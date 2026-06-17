@@ -4,32 +4,19 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Inicjalizacja aplikacji
 const app = express();
-const PORT = 3001; // Serwer będzie działał na porcie 3001
+const PORT = 3001;
 
-// Odblokowanie komunikacji między Reactem (port 3000) a Node (port 3001)
 app.use(cors());
-// Pozwala serwerowi czytać dane tekstowe w formacie JSON
 app.use(express.json()); 
-// Udostępnia folder "uploads" publicznie, żeby admin mógł pobierać z niego PDF-y
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// ---------------------------------------------------------
-// 📁 KONFIGURACJA ZAPISU PLIKÓW (MULTER)
-// ---------------------------------------------------------
-// Tworzymy foldery, jeśli nie istnieją
 const dir = './uploads';
 if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    // Wszystkie pliki lądują w folderze "uploads"
-    cb(null, 'uploads/');
-  },
+  destination: function (req, file, cb) { cb(null, 'uploads/'); },
   filename: function (req, file, cb) {
-    // Zmieniamy nazwę pliku, żeby była unikalna (dodajemy aktualną datę)
-    // Zabezpiecza to przed nadpisaniem pliku o tej samej nazwie
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     cb(null, uniqueSuffix + '-' + file.originalname);
   }
@@ -37,31 +24,78 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // ---------------------------------------------------------
-// 🗄️ BAZA DANYCH (TYMCZASOWA)
-// Na etapie testów trzymamy dane w pamięci RAM serwera (w tablicach).
-// Później zmienisz to na MongoDB lub PostgreSQL.
+// 🗄️ BAZA DANYCH (W RAM)
 // ---------------------------------------------------------
-let shifts = []; // Wystawione służby przez admina
-let reports = []; // Raporty wysłane przez kierowców po jeździe
+let users = [
+  // Domyślne konto Admina (Głównego Dyspozytora)
+  { id: 'admin-1', login: 'admin', password: '123', role: 'admin', displayName: 'Centrala vPKM' }
+]; 
+let shifts = []; 
+let reports = []; 
 
 // ---------------------------------------------------------
-// 🚀 ENDPOINTY (Trasy, z którymi łączy się React)
+// 🚀 ENDPOINTY LOGOWANIA I PRACOWNIKÓW
 // ---------------------------------------------------------
 
-// 1. Sprawdzanie, czy serwer żyje
-app.get('/', (req, res) => {
-  res.send('Serwer vPKM działa poprawnie!');
+// Logowanie
+app.post('/api/login', (req, res) => {
+  const { login, password } = req.body;
+  const user = users.find(u => u.login === login && u.password === password);
+  
+  if (user) {
+    // Nie odsyłamy hasła ze względów bezpieczeństwa
+    const { password, ...safeUser } = user;
+    res.json({ success: true, user: safeUser });
+  } else {
+    res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+  }
 });
 
-// 2. ADMIN: Wystawianie nowej służby (odbiera plik z rozkładem)
-// 'pdf_file' to nazwa pola z plikiem z naszego formularza
+// Admin: Dodawanie nowego kierowcy
+app.post('/api/drivers', (req, res) => {
+  const { login, password, displayName } = req.body;
+  
+  // Sprawdzamy czy login jest już zajęty
+  if (users.some(u => u.login === login)) {
+    return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
+  }
+
+  const newDriver = {
+    id: 'driver-' + Date.now(),
+    login,
+    password,
+    role: 'driver',
+    displayName
+  };
+
+  users.push(newDriver);
+  res.json({ success: true, driver: newDriver });
+});
+
+// Admin/Kierowca: Pobieranie listy kierowców (bez haseł)
+app.get('/api/drivers', (req, res) => {
+  const drivers = users
+    .filter(u => u.role === 'driver')
+    .map(d => ({ id: d.id, displayName: d.displayName, login: d.login }));
+  res.json(drivers);
+});
+
+// ---------------------------------------------------------
+// 🚀 ENDPOINTY SŁUŻB I RAPORTÓW
+// ---------------------------------------------------------
+
+// Admin: Wystawianie służby
 app.post('/api/shifts', upload.single('pdf_file'), (req, res) => {
-  const data = req.body; // Tekst z formularza (Linia, Brygada, itp.)
-  const file = req.file; // Załączony plik PDF
+  const data = req.body;
+  const file = req.file;
+
+  // Kasujemy poprzednią aktywną służbę tego kierowcy, żeby się nie dublowały
+  shifts = shifts.filter(s => s.driverId !== data.driverId);
 
   const newShift = {
     id: Date.now(),
-    driver: data.driver,
+    driverId: data.driverId, // Używamy ID kierowcy, a nie nicku (unikamy problemu ze spacjami)
+    driverName: data.driverName,
     line: data.line,
     brigade: data.brigade,
     bus: data.bus,
@@ -71,76 +105,64 @@ app.post('/api/shifts', upload.single('pdf_file'), (req, res) => {
     status: 'active'
   };
 
-  shifts.push(newShift); // Zapisujemy w naszej tymczasowej bazie
-  console.log('Nowa służba dodana:', newShift);
-  
-  res.json({ message: 'Służba wystawiona pomyślnie!', shift: newShift });
+  shifts.push(newShift);
+  res.json({ success: true, shift: newShift });
 });
 
-// 3. KIEROWCA: Pobieranie swojej służby
-app.get('/api/shifts/:driverName', (req, res) => {
-  const driverName = req.params.driverName;
-  // Szukamy w bazie aktywnej służby dla tego kierowcy
-  const myShift = shifts.find(s => s.driver === driverName && s.status === 'active');
+// Kierowca: Pobieranie swojej służby (po unikalnym ID)
+app.get('/api/shifts/:driverId', (req, res) => {
+  const driverId = req.params.driverId;
+  const myShift = shifts.find(s => s.driverId === driverId && s.status === 'active');
   
   if (myShift) {
     res.json({ shift: myShift });
   } else {
-    res.json({ shift: null, message: 'Brak przypisanych służb.' });
+    res.json({ shift: null });
   }
 });
 
-// 4. KIEROWCA: Wysyłanie raportu po służbie (odbiera PDF)
+// Kierowca: Wysłanie raportu
 app.post('/api/reports', upload.single('report_pdf'), (req, res) => {
   const file = req.file;
-  
-  if (!file) {
-    return res.status(400).json({ error: 'Brak pliku PDF!' });
-  }
+  if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
 
   const newReport = {
     id: Date.now(),
-    driver: req.body.driver,
+    driverId: req.body.driverId,
+    driverName: req.body.driverName,
     line: req.body.line,
     date: new Date().toLocaleString('pl-PL'),
-    pdfUrl: `/uploads/${file.filename}`, // Link do pobrania pliku
+    pdfUrl: `/uploads/${file.filename}`,
     originalName: file.originalname,
-    status: 'pending' // 'pending' = czeka na sprawdzenie przez admina
+    status: 'pending'
   };
 
+  // Zmieniamy status służby, żeby nie wisiała jako aktywna po zdanym raporcie
+  const shiftIndex = shifts.findIndex(s => s.driverId === req.body.driverId && s.status === 'active');
+  if (shiftIndex > -1) shifts[shiftIndex].status = 'completed';
+
   reports.push(newReport);
-  console.log('Nowy raport otrzymany:', newReport);
-
-  res.json({ message: 'Raport dostarczony do dyspozytorni!' });
+  res.json({ success: true });
 });
 
-// 5. ADMIN: Pobieranie listy raportów do sprawdzenia
+// Admin: Lista raportów i zarządzanie nimi
 app.get('/api/reports/pending', (req, res) => {
-  const pendingReports = reports.filter(r => r.status === 'pending');
-  res.json({ reports: pendingReports });
+  res.json({ reports: reports.filter(r => r.status === 'pending') });
 });
 
-// 6. ADMIN: Zmiana statusu raportu (Zatwierdź / Odrzuć)
 app.post('/api/reports/:id/status', (req, res) => {
   const reportId = parseInt(req.params.id);
-  const action = req.body.action; // np. 'approve' lub 'reject'
-
+  const action = req.body.action; 
   const reportIndex = reports.findIndex(r => r.id === reportId);
   
   if (reportIndex > -1) {
     reports[reportIndex].status = action === 'approve' ? 'approved' : 'rejected';
-    res.json({ message: `Status zmieniony na: ${action}` });
+    res.json({ success: true });
   } else {
     res.status(404).json({ error: 'Nie znaleziono raportu' });
   }
 });
 
-// ---------------------------------------------------------
-// 🏁 URUCHOMIENIE SERWERA
-// ---------------------------------------------------------
 app.listen(PORT, () => {
-  console.log(`=================================`);
-  console.log(`✅ Serwer uruchomiony!`);
-  console.log(`✅ Nasłuchuję na: http://localhost:${PORT}`);
-  console.log(`=================================`);
+  console.log(`✅ Serwer uruchomiony na: http://localhost:${PORT}`);
 });
