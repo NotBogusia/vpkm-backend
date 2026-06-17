@@ -3,12 +3,15 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 
 const app = express();
 const PORT = 3001;
+const SECRET = 'vpkm-tychy-super-tajny-klucz-2024-zmien-to-na-cos-swojego';
 
 app.use(cors());
-app.use(express.json()); 
+app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const dir = './uploads';
@@ -23,47 +26,171 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-let users = [
-  { id: 'admin-1', login: 'admin', password: '123', role: 'admin', displayName: 'Centrala vPKM' }
-]; 
-let shifts = []; 
-let reports = []; 
+// ---------------------------------------------------------
+// 🔐 MIDDLEWARE AUTORYZACJI
+// ---------------------------------------------------------
 
-app.post('/api/login', (req, res) => {
+// Sprawdza czy token jest prawidłowy (dowolny zalogowany użytkownik)
+const requireAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Brak tokenu autoryzacji' });
+  }
+  const token = authHeader.split(' ')[1];
+  try {
+    req.user = jwt.verify(token, SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token nieprawidłowy lub wygasł' });
+  }
+};
+
+// Sprawdza czy zalogowany użytkownik jest adminem
+const requireAdmin = (req, res, next) => {
+  requireAuth(req, res, () => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Brak uprawnień administratora' });
+    }
+    next();
+  });
+};
+
+// ---------------------------------------------------------
+// 🗄️ BAZA DANYCH (W RAM)
+// ---------------------------------------------------------
+
+// Hasło admina jest zahashowane przez bcrypt
+// Żeby wygenerować hash dla "123" uruchom raz: node -e "require('bcrypt').hash('123',10).then(console.log)"
+// i wklej wynik poniżej. Na razie używamy synchronicznego hashowania przy starcie.
+let adminPasswordHash = '';
+bcrypt.hash('123', 10).then(hash => { adminPasswordHash = hash; });
+
+let users = [];
+// Admin jest inicjalizowany po zahashowaniu hasła
+setTimeout(() => {
+  users = [
+    { id: 'admin-1', login: 'admin', password: adminPasswordHash, role: 'admin', displayName: 'Centrala vPKM' }
+  ];
+}, 100);
+
+let shifts = [];
+let reports = [];
+
+// ---------------------------------------------------------
+// 🚀 ENDPOINTY PUBLICZNE (bez tokenu)
+// ---------------------------------------------------------
+
+// Logowanie — jedyny endpoint bez autoryzacji
+app.post('/api/login', async (req, res) => {
   const { login, password } = req.body;
-  const user = users.find(u => u.login === login && u.password === password);
-  if (user) {
-    const { password, ...safeUser } = user;
-    res.json({ success: true, user: safeUser });
-  } else {
-    res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+  const user = users.find(u => u.login === login);
+
+  if (!user) {
+    return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
   }
+
+  const passwordMatch = await bcrypt.compare(password, user.password);
+  if (!passwordMatch) {
+    return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+  }
+
+  // Generujemy token JWT ważny 8 godzin
+  const token = jwt.sign(
+    { id: user.id, role: user.role, displayName: user.displayName },
+    SECRET,
+    { expiresIn: '8h' }
+  );
+
+  const { password: _, ...safeUser } = user;
+  res.json({ success: true, user: safeUser, token });
 });
 
-app.post('/api/drivers', (req, res) => {
-  const { login, password, displayName } = req.body;
-  if (users.some(u => u.login === login)) {
-    return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
-  }
-  const newDriver = {
-    id: 'driver-' + Date.now(),
-    login, password, role: 'driver', displayName
-  };
-  users.push(newDriver);
-  res.json({ success: true, driver: newDriver });
+// Główna strona — informacja że serwer działa
+app.get('/', (req, res) => {
+  res.send('Serwer vPKM działa poprawnie!');
 });
 
-app.get('/api/drivers', (req, res) => {
+// ---------------------------------------------------------
+// 🚀 ENDPOINTY CHRONIONE — KIEROWCA I ADMIN
+// ---------------------------------------------------------
+
+// Pobieranie listy kierowców (kierowca też może widzieć listę)
+app.get('/api/drivers', requireAuth, (req, res) => {
   const drivers = users
     .filter(u => u.role === 'driver')
     .map(d => ({ id: d.id, displayName: d.displayName, login: d.login }));
   res.json(drivers);
 });
 
-app.post('/api/shifts', upload.single('pdf_file'), (req, res) => {
+// Kierowca: pobieranie swojej służby
+app.get('/api/shifts/:driverId', requireAuth, (req, res) => {
+  // Kierowca może pobierać tylko swoją służbę, admin może pobierać każdą
+  if (req.user.role === 'driver' && req.user.id !== req.params.driverId) {
+    return res.status(403).json({ error: 'Możesz sprawdzać tylko swoją służbę' });
+  }
+  const driverId = req.params.driverId;
+  const myShift = shifts.find(s => s.driverId === driverId && s.status === 'active');
+  res.json({ shift: myShift || null });
+});
+
+// Kierowca: wysłanie raportu
+app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
+
+  const newReport = {
+    id: Date.now(),
+    driverId: req.body.driverId,
+    driverName: req.body.driverName,
+    line: req.body.line,
+    date: new Date().toLocaleString('pl-PL'),
+    pdfUrl: `/uploads/${file.filename}`,
+    originalName: file.originalname,
+    status: 'pending'
+  };
+
+  const shiftIndex = shifts.findIndex(s => s.driverId === req.body.driverId && s.status === 'active');
+  if (shiftIndex > -1) shifts[shiftIndex].status = 'completed';
+
+  reports.push(newReport);
+  res.json({ success: true });
+});
+
+// ---------------------------------------------------------
+// 🚀 ENDPOINTY CHRONIONE — TYLKO ADMIN
+// ---------------------------------------------------------
+
+// Admin: dodawanie nowego kierowcy
+app.post('/api/drivers', requireAdmin, async (req, res) => {
+  const { login, password, displayName } = req.body;
+
+  if (users.some(u => u.login === login)) {
+    return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
+  }
+
+  // Hashujemy hasło przed zapisem
+  const hashedPassword = await bcrypt.hash(password, 10);
+
+  const newDriver = {
+    id: 'driver-' + Date.now(),
+    login,
+    password: hashedPassword,
+    role: 'driver',
+    displayName
+  };
+
+  users.push(newDriver);
+  const { password: _, ...safeDriver } = newDriver;
+  res.json({ success: true, driver: safeDriver });
+});
+
+// Admin: wystawianie służby
+app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
   const data = req.body;
   const file = req.file;
+
   shifts = shifts.filter(s => s.driverId !== data.driverId);
+
   const newShift = {
     id: Date.now(),
     driverId: data.driverId,
@@ -76,59 +203,33 @@ app.post('/api/shifts', upload.single('pdf_file'), (req, res) => {
     pdfUrl: file ? `/uploads/${file.filename}` : null,
     status: 'active'
   };
+
   shifts.push(newShift);
   res.json({ success: true, shift: newShift });
 });
 
-// Admin: Lista wszystkich aktywnych służb
-app.get('/api/shifts', (req, res) => {
+// Admin: lista wszystkich aktywnych służb
+app.get('/api/shifts', requireAdmin, (req, res) => {
   res.json({ shifts: shifts.filter(s => s.status === 'active') });
 });
 
-app.get('/api/shifts/:driverId', (req, res) => {
-  const driverId = req.params.driverId;
-  const myShift = shifts.find(s => s.driverId === driverId && s.status === 'active');
-  if (myShift) {
-    res.json({ shift: myShift });
-  } else {
-    res.json({ shift: null });
-  }
-});
-
-// Admin: Anulowanie służby
-app.delete('/api/shifts/:driverId', (req, res) => {
-  const driverId = req.params.driverId;
-  shifts = shifts.filter(s => s.driverId !== driverId);
+// Admin: anulowanie służby
+app.delete('/api/shifts/:driverId', requireAdmin, (req, res) => {
+  shifts = shifts.filter(s => s.driverId !== req.params.driverId);
   res.json({ success: true });
 });
 
-app.post('/api/reports', upload.single('report_pdf'), (req, res) => {
-  const file = req.file;
-  if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
-  const newReport = {
-    id: Date.now(),
-    driverId: req.body.driverId,
-    driverName: req.body.driverName,
-    line: req.body.line,
-    date: new Date().toLocaleString('pl-PL'),
-    pdfUrl: `/uploads/${file.filename}`,
-    originalName: file.originalname,
-    status: 'pending'
-  };
-  const shiftIndex = shifts.findIndex(s => s.driverId === req.body.driverId && s.status === 'active');
-  if (shiftIndex > -1) shifts[shiftIndex].status = 'completed';
-  reports.push(newReport);
-  res.json({ success: true });
-});
-
-app.get('/api/reports/pending', (req, res) => {
+// Admin: lista raportów do weryfikacji
+app.get('/api/reports/pending', requireAdmin, (req, res) => {
   res.json({ reports: reports.filter(r => r.status === 'pending') });
 });
 
-app.post('/api/reports/:id/status', (req, res) => {
+// Admin: zatwierdzenie/odrzucenie raportu
+app.post('/api/reports/:id/status', requireAdmin, (req, res) => {
   const reportId = parseInt(req.params.id);
-  const action = req.body.action; 
+  const action = req.body.action;
   const reportIndex = reports.findIndex(r => r.id === reportId);
+
   if (reportIndex > -1) {
     reports[reportIndex].status = action === 'approve' ? 'approved' : 'rejected';
     res.json({ success: true });
