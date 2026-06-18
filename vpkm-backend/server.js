@@ -47,7 +47,7 @@ app.set('trust proxy', 1);
 // FRONTEND_URL=https://twoja-domena.vercel.app,https://twoj-projekt.vercel.app
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
   .split(',')
-  .map(s => s.trim())
+  .map(s => s.trim().replace(/\/$/, ''))
   .filter(Boolean);
 
 app.use(cors({
