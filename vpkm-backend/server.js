@@ -264,6 +264,27 @@ app.get('/api/drivers', requireAuth, async (req, res) => {
   })));
 });
 
+// WAŻNE: endpoint history MUSI być przed /:driverId żeby Express go nie pomylił
+app.get('/api/shifts/history/:driverId', requireAuth, async (req, res) => {
+  if (req.user.role === 'driver' && req.user.id !== req.params.driverId) {
+    return res.status(403).json({ error: 'Brak dostępu' });
+  }
+
+  const result = await pool.query(
+    "SELECT * FROM shifts WHERE driver_id = $1 AND status != 'active' ORDER BY id DESC LIMIT 20",
+    [req.params.driverId]
+  );
+
+  res.json({
+    history: result.rows.map(s => ({
+      id: s.id, driverName: s.driver_name,
+      line: s.line, brigade: s.brigade, bus: s.bus,
+      startTime: s.start_time, endTime: s.end_time,
+      status: s.status
+    }))
+  });
+});
+
 app.get('/api/shifts/:driverId', requireAuth, async (req, res) => {
   if (req.user.role === 'driver' && req.user.id !== req.params.driverId) {
     return res.status(403).json({ error: 'Możesz sprawdzać tylko swoją służbę' });
@@ -313,6 +334,34 @@ app.get('/api/fleet', requireAuth, async (req, res) => {
     assignedDriverId: b.assigned_driver_id,
     assignedDriverName: b.assigned_driver_name
   })));
+});
+
+// ---------------------------------------------------------
+// 🔑 ZMIANA HASŁA — KIEROWCA I ADMIN
+// ---------------------------------------------------------
+app.post('/api/change-password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'Nowe hasło musi mieć minimum 6 znaków' });
+  }
+
+  const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+  const user = result.rows[0];
+
+  if (!user) {
+    return res.status(404).json({ error: 'Nie znaleziono użytkownika' });
+  }
+
+  const passwordMatch = await bcrypt.compare(currentPassword, user.password);
+  if (!passwordMatch) {
+    return res.status(401).json({ error: 'Obecne hasło jest nieprawidłowe' });
+  }
+
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, req.user.id]);
+
+  res.json({ success: true });
 });
 
 // ---------------------------------------------------------
@@ -409,6 +458,19 @@ app.post('/api/drivers', requireAdmin, async (req, res) => {
   res.json({ success: true, driver: { id, login, role: 'driver', displayName } });
 });
 
+// WAŻNE: ten endpoint musi być przed /api/shifts/:driverId
+app.get('/api/shifts', requireAdmin, async (req, res) => {
+  const result = await pool.query("SELECT * FROM shifts WHERE status = 'active'");
+  res.json({
+    shifts: result.rows.map(s => ({
+      id: s.id, driverId: s.driver_id, driverName: s.driver_name,
+      line: s.line, brigade: s.brigade, bus: s.bus,
+      startTime: s.start_time, endTime: s.end_time,
+      pdfUrl: s.pdf_url, status: s.status
+    }))
+  });
+});
+
 app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), async (req, res) => {
   const data = req.body;
   const file = req.file;
@@ -430,38 +492,32 @@ app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), async (req, res
   res.json({ success: true, shift: { id, ...data, pdfUrl, status: 'active' } });
 });
 
-app.get('/api/shifts', requireAdmin, async (req, res) => {
-  const result = await pool.query("SELECT * FROM shifts WHERE status = 'active'");
-  res.json({
-    shifts: result.rows.map(s => ({
-      id: s.id, driverId: s.driver_id, driverName: s.driver_name,
-      line: s.line, brigade: s.brigade, bus: s.bus,
-      startTime: s.start_time, endTime: s.end_time,
-      pdfUrl: s.pdf_url, status: s.status
-    }))
-  });
+app.delete('/api/shifts/:driverId', requireAdmin, async (req, res) => {
+  await pool.query('DELETE FROM shifts WHERE driver_id = $1', [req.params.driverId]);
+  res.json({ success: true });
 });
 
+// 1. USUWANIE KIEROWCY
 app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
-  
+
   // Usuń powiązane służby i raporty
   await pool.query('DELETE FROM shifts WHERE driver_id = $1', [id]);
   await pool.query('DELETE FROM reports WHERE driver_id = $1', [id]);
-  
+
   // Odepnij kierowcę od taboru
   await pool.query(
     'UPDATE fleet SET assigned_driver_id = $1, assigned_driver_name = $2 WHERE assigned_driver_id = $3',
     ['', 'Brak', id]
   );
-  
+
   // Usuń użytkownika
   const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [id]);
-  
+
   if (result.rows.length === 0) {
     return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
   }
-  
+
   res.json({ success: true });
 });
 
