@@ -177,15 +177,18 @@ app.use(cors({
 // ---------------------------------------------------------
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Za dużo zapytań. Spróbuj ponownie za chwilę.' }
 });
 
+// Login: 50 prób na 15 minut — wystarczy na normalne użytkowanie,
+// chroni przed brute-force, ale nie zablokuje użytkownika który
+// kilka razy kliknie przycisk podczas wolnego startu serwera
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 50,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' }
@@ -259,30 +262,40 @@ app.get('/', (req, res) => {
 });
 
 app.post('/api/login', loginLimiter, async (req, res) => {
-  const { login, password } = req.body;
-  const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
-  const user = result.rows[0];
+  try {
+    const { login, password } = req.body;
 
-  if (!user) {
-    return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    if (!login || !password) {
+      return res.status(400).json({ success: false, message: 'Podaj login i hasło.' });
+    }
+
+    const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    }
+
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) {
+      return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, role: user.role, displayName: user.display_name },
+      SECRET,
+      { expiresIn: '8h' }
+    );
+
+    res.json({
+      success: true,
+      user: { id: user.id, login: user.login, role: user.role, displayName: user.display_name },
+      token
+    });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ success: false, message: 'Błąd serwera. Spróbuj ponownie.' });
   }
-
-  const passwordMatch = await bcrypt.compare(password, user.password);
-  if (!passwordMatch) {
-    return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
-  }
-
-  const token = jwt.sign(
-    { id: user.id, role: user.role, displayName: user.display_name },
-    SECRET,
-    { expiresIn: '8h' }
-  );
-
-  res.json({
-    success: true,
-    user: { id: user.id, login: user.login, role: user.role, displayName: user.display_name },
-    token
-  });
 });
 
 // ---------------------------------------------------------
