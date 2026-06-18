@@ -442,8 +442,26 @@ app.get('/api/shifts', requireAdmin, async (req, res) => {
   });
 });
 
-app.delete('/api/shifts/:driverId', requireAdmin, async (req, res) => {
-  await pool.query('DELETE FROM shifts WHERE driver_id = $1', [req.params.driverId]);
+app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  
+  // Usuń powiązane służby i raporty
+  await pool.query('DELETE FROM shifts WHERE driver_id = $1', [id]);
+  await pool.query('DELETE FROM reports WHERE driver_id = $1', [id]);
+  
+  // Odepnij kierowcę od taboru
+  await pool.query(
+    'UPDATE fleet SET assigned_driver_id = $1, assigned_driver_name = $2 WHERE assigned_driver_id = $3',
+    ['', 'Brak', id]
+  );
+  
+  // Usuń użytkownika
+  const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [id]);
+  
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
+  }
+  
   res.json({ success: true });
 });
 
