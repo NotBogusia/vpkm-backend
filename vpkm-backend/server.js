@@ -111,6 +111,12 @@ setTimeout(() => {
 let shifts = [];
 let reports = [];
 
+// 🆕 NOWOŚĆ: Baza danych taboru z przykładowymi wozami na start
+let fleet = [
+  { id: 'bus-1', busNumber: '421', model: 'Solaris Urbino 18', assignedDriverId: '', assignedDriverName: 'Brak' },
+  { id: 'bus-2', busNumber: '105', model: 'MAN Lion\'s City', assignedDriverId: '', assignedDriverName: 'Brak' }
+];
+
 // ---------------------------------------------------------
 // 🚀 ENDPOINTY PUBLICZNE
 // ---------------------------------------------------------
@@ -185,9 +191,57 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) =>
   res.json({ success: true });
 });
 
+// 🆕 NOWOŚĆ: Pobieranie spisu taboru (Dostępne dla każdego zalogowanego)
+app.get('/api/fleet', requireAuth, (req, res) => {
+  res.json(fleet);
+});
+
 // ---------------------------------------------------------
 // 🚀 ENDPOINTY CHRONIONE — TYLKO ADMIN
 // ---------------------------------------------------------
+
+// 🆕 NOWOŚĆ: Dodawanie nowego pojazdu do taboru
+app.post('/api/fleet', requireAdmin, (req, res) => {
+  const { busNumber, model, assignedDriverId, assignedDriverName } = req.body;
+  
+  const newVehicle = {
+    id: 'bus-' + Date.now(),
+    busNumber,
+    model,
+    assignedDriverId: assignedDriverId || '',
+    assignedDriverName: assignedDriverName || 'Brak'
+  };
+  
+  fleet.push(newVehicle);
+  res.json({ success: true, vehicle: newVehicle });
+});
+
+// 🆕 NOWOŚĆ: Edycja istniejącego pojazdu w taborze
+app.put('/api/fleet/:id', requireAdmin, (req, res) => {
+  const id = req.params.id;
+  const { busNumber, model, assignedDriverId, assignedDriverName } = req.body;
+  const index = fleet.findIndex(b => b.id === id);
+  
+  if (index > -1) {
+    fleet[index] = {
+      ...fleet[index],
+      busNumber,
+      model,
+      assignedDriverId: assignedDriverId || '',
+      assignedDriverName: assignedDriverName || 'Brak'
+    };
+    res.json({ success: true, vehicle: fleet[index] });
+  } else {
+    res.status(404).json({ error: 'Nie znaleziono takiego pojazdu w bazie taboru!' });
+  }
+});
+
+// 🆕 NOWOŚĆ: Usuwanie pojazdu z taboru
+app.delete('/api/fleet/:id', requireAdmin, (req, res) => {
+  const id = req.params.id;
+  fleet = fleet.filter(b => b.id !== id);
+  res.json({ success: true });
+});
 
 app.post('/api/drivers', requireAdmin, async (req, res) => {
   const { login, password, displayName } = req.body;
@@ -222,7 +276,8 @@ app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
     driverId: data.driverId,
     driverName: data.driverName,
     line: data.line,
-    brigade: data.brigade,
+    get brigade() { return data.brigade; },
+    set brigade(value) { data.brigade = value; },
     bus: data.bus,
     startTime: data.startTime,
     endTime: data.endTime,
