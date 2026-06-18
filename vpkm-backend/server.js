@@ -9,19 +9,65 @@ const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 
 const app = express();
-const PORT = 3001;
-const SECRET = 'vpkm-tychy-super-tajny-klucz-2024-zmien-to-na-cos-swojego';
+const PORT = process.env.PORT || 3001;
+
+// ---------------------------------------------------------
+// 🔑 SEKRETY Z ZMIENNYCH ŚRODOWISKOWYCH (PUNKT 1 i 2)
+// ---------------------------------------------------------
+// Serwer NIE WYSTARTUJE bez tych zmiennych ustawionych w Railway.
+// To wymusza, że nikt nie zostawi domyślnego/hardcodowanego sekretu.
+const SECRET = process.env.JWT_SECRET;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+if (!SECRET) {
+  console.error('❌ BŁĄD KRYTYCZNY: zmienna środowiskowa JWT_SECRET nie jest ustawiona.');
+  console.error('   Ustaw ją w Railway (Settings → Variables) i zrestartuj serwis.');
+  process.exit(1);
+}
+
+if (!ADMIN_PASSWORD) {
+  console.error('❌ BŁĄD KRYTYCZNY: zmienna środowiskowa ADMIN_PASSWORD nie jest ustawiona.');
+  console.error('   Ustaw ją w Railway (Settings → Variables) i zrestartuj serwis.');
+  process.exit(1);
+}
 
 // ---------------------------------------------------------
 // 🛡️ HELMET — nagłówki bezpieczeństwa
 // ---------------------------------------------------------
 app.use(helmet());
 
+// Railway stawia aplikację za reverse proxy — bez tego express-rate-limit
+// liczy limity względem adresu IP proxy, a nie prawdziwego klienta.
+app.set('trust proxy', 1);
+
+// ---------------------------------------------------------
+// 🌐 CORS — TYLKO DOZWOLONE DOMENY (PUNKT 5)
+// ---------------------------------------------------------
+// FRONTEND_URL w Railway np.:
+// FRONTEND_URL=https://twoja-domena.vercel.app,https://twoj-projekt.vercel.app
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // brak origin = zapytania serwer-serwer / curl / Postman — przepuszczamy
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`⚠️  Zablokowane zapytanie CORS z pochodzenia: ${origin}`);
+      callback(new Error('Niedozwolone pochodzenie (CORS)'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
 // ---------------------------------------------------------
 // 🚦 RATE LIMITING
 // ---------------------------------------------------------
 
-// Globalne: max 100 zapytań na 15 minut z jednego IP
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -30,7 +76,6 @@ const globalLimiter = rateLimit({
   message: { error: 'Za dużo zapytań. Spróbuj ponownie za chwilę.' }
 });
 
-// Na logowanie: max 10 prób na 15 minut (anty brute-force)
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -44,27 +89,43 @@ app.use(globalLimiter);
 // ---------------------------------------------------------
 // STANDARDOWE MIDDLEWARE
 // ---------------------------------------------------------
-app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const dir = './uploads';
 if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
+// ⚠️ UWAGA: usunięto `app.use('/uploads', express.static(...))`.
+// Pliki nie są już publicznie dostępne — patrz endpoint /api/files/:filename
+// chroniony przez requireAuth niżej (PUNKT 4).
+
 // ---------------------------------------------------------
-// 📁 MULTER — limit rozmiaru pliku 10MB
+// 📁 MULTER — limit rozmiaru pliku 10MB + WALIDACJA TYPU (PUNKT 3)
 // ---------------------------------------------------------
 const storage = multer.diskStorage({
   destination: function (req, file, cb) { cb(null, 'uploads/'); },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + '-' + file.originalname);
+    // Sanityzacja oryginalnej nazwy pliku — usuwamy wszystko poza
+    // literami, cyframi, myślnikiem, podkreślnikiem i kropką.
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
+    cb(null, uniqueSuffix + '-' + safeName);
   }
 });
 
+const pdfFileFilter = (req, file, cb) => {
+  const isPdfMime = file.mimetype === 'application/pdf';
+  const isPdfExt = path.extname(file.originalname).toLowerCase() === '.pdf';
+  if (isPdfMime && isPdfExt) {
+    cb(null, true);
+  } else {
+    cb(new Error('Tylko pliki PDF są dozwolone.'));
+  }
+};
+
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 } // max 10MB
+  limits: { fileSize: 10 * 1024 * 1024 }, // max 10MB
+  fileFilter: pdfFileFilter
 });
 
 // ---------------------------------------------------------
@@ -97,21 +158,14 @@ const requireAdmin = (req, res, next) => {
 // ---------------------------------------------------------
 // 🗄️ BAZA DANYCH (W RAM)
 // ---------------------------------------------------------
-
-let adminPasswordHash = '';
-bcrypt.hash('123', 10).then(hash => { adminPasswordHash = hash; });
+// ⚠️ PRZYPOMNIENIE: to wciąż dane w pamięci procesu — znikają przy każdym
+// restarcie/deployu. To temat na kolejny krok (migracja na Postgres),
+// nieobjęty tym patchem (punkty 1-5).
 
 let users = [];
-setTimeout(() => {
-  users = [
-    { id: 'admin-1', login: 'admin', password: adminPasswordHash, role: 'admin', displayName: 'Centrala vPKM' }
-  ];
-}, 100);
-
 let shifts = [];
 let reports = [];
 
-// 🆕 NOWOŚĆ: Baza danych taboru z przykładowymi wozami na start
 let fleet = [
   { id: 'bus-1', busNumber: '421', model: 'Solaris Urbino 18', assignedDriverId: '', assignedDriverName: 'Brak' },
   { id: 'bus-2', busNumber: '105', model: 'MAN Lion\'s City', assignedDriverId: '', assignedDriverName: 'Brak' }
@@ -125,7 +179,6 @@ app.get('/', (req, res) => {
   res.send('Serwer vPKM działa poprawnie!');
 });
 
-// Logowanie z osobnym, ostrzejszym rate limiterem
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { login, password } = req.body;
   const user = users.find(u => u.login === login);
@@ -179,7 +232,7 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) =>
     driverName: req.body.driverName,
     line: req.body.line,
     date: new Date().toLocaleString('pl-PL'),
-    pdfUrl: `/uploads/${file.filename}`,
+    pdfUrl: `/api/files/${file.filename}`,
     originalName: file.originalname,
     status: 'pending'
   };
@@ -191,19 +244,52 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) =>
   res.json({ success: true });
 });
 
-// 🆕 NOWOŚĆ: Pobieranie spisu taboru (Dostępne dla każdego zalogowanego)
 app.get('/api/fleet', requireAuth, (req, res) => {
   res.json(fleet);
+});
+
+// ---------------------------------------------------------
+// 📥 PUNKT 4: CHRONIONY DOSTĘP DO PLIKÓW
+// ---------------------------------------------------------
+// Zastępuje publiczny katalog statyczny /uploads. Każde pobranie pliku
+// wymaga prawidłowego tokenu. Admin widzi wszystko, kierowca tylko pliki
+// powiązane z jego własną służbą lub jego własnym raportem.
+
+app.get('/api/files/:filename', requireAuth, (req, res) => {
+  const filename = req.params.filename;
+
+  // Ochrona przed path traversal (np. ../../etc/passwd)
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
+  }
+
+  const filePath = path.join(__dirname, 'uploads', filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Plik nie istnieje' });
+  }
+
+  if (req.user.role === 'admin') {
+    return res.sendFile(filePath);
+  }
+
+  const relativeUrl = `/api/files/${filename}`;
+  const ownsShift = shifts.some(s => s.pdfUrl === relativeUrl && s.driverId === req.user.id);
+  const ownsReport = reports.some(r => r.pdfUrl === relativeUrl && r.driverId === req.user.id);
+
+  if (ownsShift || ownsReport) {
+    return res.sendFile(filePath);
+  }
+
+  return res.status(403).json({ error: 'Brak dostępu do tego pliku' });
 });
 
 // ---------------------------------------------------------
 // 🚀 ENDPOINTY CHRONIONE — TYLKO ADMIN
 // ---------------------------------------------------------
 
-// 🆕 NOWOŚĆ: Dodawanie nowego pojazdu do taboru
 app.post('/api/fleet', requireAdmin, (req, res) => {
   const { busNumber, model, assignedDriverId, assignedDriverName } = req.body;
-  
+
   const newVehicle = {
     id: 'bus-' + Date.now(),
     busNumber,
@@ -211,17 +297,16 @@ app.post('/api/fleet', requireAdmin, (req, res) => {
     assignedDriverId: assignedDriverId || '',
     assignedDriverName: assignedDriverName || 'Brak'
   };
-  
+
   fleet.push(newVehicle);
   res.json({ success: true, vehicle: newVehicle });
 });
 
-// 🆕 NOWOŚĆ: Edycja istniejącego pojazdu w taborze
 app.put('/api/fleet/:id', requireAdmin, (req, res) => {
   const id = req.params.id;
   const { busNumber, model, assignedDriverId, assignedDriverName } = req.body;
   const index = fleet.findIndex(b => b.id === id);
-  
+
   if (index > -1) {
     fleet[index] = {
       ...fleet[index],
@@ -236,7 +321,6 @@ app.put('/api/fleet/:id', requireAdmin, (req, res) => {
   }
 });
 
-// 🆕 NOWOŚĆ: Usuwanie pojazdu z taboru
 app.delete('/api/fleet/:id', requireAdmin, (req, res) => {
   const id = req.params.id;
   fleet = fleet.filter(b => b.id !== id);
@@ -281,7 +365,7 @@ app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
     bus: data.bus,
     startTime: data.startTime,
     endTime: data.endTime,
-    pdfUrl: file ? `/uploads/${file.filename}` : null,
+    pdfUrl: file ? `/api/files/${file.filename}` : null,
     status: 'active'
   };
 
@@ -315,6 +399,43 @@ app.post('/api/reports/:id/status', requireAdmin, (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`✅ Serwer uruchomiony na: http://localhost:${PORT}`);
+// ---------------------------------------------------------
+// ⚠️ CENTRALNY HANDLER BŁĘDÓW (multer / CORS / inne)
+// ---------------------------------------------------------
+// Musi być zarejestrowany jako ostatni middleware.
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: 'Błąd przesyłania pliku: ' + err.message });
+  }
+  if (err && err.message === 'Tylko pliki PDF są dozwolone.') {
+    return res.status(400).json({ error: err.message });
+  }
+  if (err && err.message === 'Niedozwolone pochodzenie (CORS)') {
+    return res.status(403).json({ error: 'Ta domena nie ma dostępu do API' });
+  }
+  console.error(err);
+  res.status(500).json({ error: 'Wewnętrzny błąd serwera' });
 });
+
+// ---------------------------------------------------------
+// 🚀 START SERWERA
+// ---------------------------------------------------------
+// Hasło admina jest teraz zahaszowane PRZED startem serwera (nie w setTimeout
+// po starcie), więc nie ma już krótkiego okna, w którym logowanie nie działa.
+async function startServer() {
+  const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
+  users.push({
+    id: 'admin-1',
+    login: 'admin',
+    password: adminPasswordHash,
+    role: 'admin',
+    displayName: 'Centrala vPKM'
+  });
+
+  app.listen(PORT, () => {
+    console.log(`✅ Serwer uruchomiony na porcie: ${PORT}`);
+    console.log(`   Dozwolone domeny CORS: ${allowedOrigins.join(', ')}`);
+  });
+}
+
+startServer();
