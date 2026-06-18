@@ -5,11 +5,45 @@ const path = require('path');
 const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 
 const app = express();
 const PORT = 3001;
 const SECRET = 'vpkm-tychy-super-tajny-klucz-2024-zmien-to-na-cos-swojego';
 
+// ---------------------------------------------------------
+// 🛡️ HELMET — nagłówki bezpieczeństwa
+// ---------------------------------------------------------
+app.use(helmet());
+
+// ---------------------------------------------------------
+// 🚦 RATE LIMITING
+// ---------------------------------------------------------
+
+// Globalne: max 100 zapytań na 15 minut z jednego IP
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Za dużo zapytań. Spróbuj ponownie za chwilę.' }
+});
+
+// Na logowanie: max 10 prób na 15 minut (anty brute-force)
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' }
+});
+
+app.use(globalLimiter);
+
+// ---------------------------------------------------------
+// STANDARDOWE MIDDLEWARE
+// ---------------------------------------------------------
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -17,6 +51,9 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 const dir = './uploads';
 if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 
+// ---------------------------------------------------------
+// 📁 MULTER — limit rozmiaru pliku 10MB
+// ---------------------------------------------------------
 const storage = multer.diskStorage({
   destination: function (req, file, cb) { cb(null, 'uploads/'); },
   filename: function (req, file, cb) {
@@ -24,13 +61,16 @@ const storage = multer.diskStorage({
     cb(null, uniqueSuffix + '-' + file.originalname);
   }
 });
-const upload = multer({ storage: storage });
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 10 * 1024 * 1024 } // max 10MB
+});
 
 // ---------------------------------------------------------
-// 🔐 MIDDLEWARE AUTORYZACJI
+// 🔐 MIDDLEWARE AUTORYZACJI JWT
 // ---------------------------------------------------------
 
-// Sprawdza czy token jest prawidłowy (dowolny zalogowany użytkownik)
 const requireAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -45,7 +85,6 @@ const requireAuth = (req, res, next) => {
   }
 };
 
-// Sprawdza czy zalogowany użytkownik jest adminem
 const requireAdmin = (req, res, next) => {
   requireAuth(req, res, () => {
     if (req.user.role !== 'admin') {
@@ -59,14 +98,10 @@ const requireAdmin = (req, res, next) => {
 // 🗄️ BAZA DANYCH (W RAM)
 // ---------------------------------------------------------
 
-// Hasło admina jest zahashowane przez bcrypt
-// Żeby wygenerować hash dla "123" uruchom raz: node -e "require('bcrypt').hash('123',10).then(console.log)"
-// i wklej wynik poniżej. Na razie używamy synchronicznego hashowania przy starcie.
 let adminPasswordHash = '';
 bcrypt.hash('123', 10).then(hash => { adminPasswordHash = hash; });
 
 let users = [];
-// Admin jest inicjalizowany po zahashowaniu hasła
 setTimeout(() => {
   users = [
     { id: 'admin-1', login: 'admin', password: adminPasswordHash, role: 'admin', displayName: 'Centrala vPKM' }
@@ -77,11 +112,15 @@ let shifts = [];
 let reports = [];
 
 // ---------------------------------------------------------
-// 🚀 ENDPOINTY PUBLICZNE (bez tokenu)
+// 🚀 ENDPOINTY PUBLICZNE
 // ---------------------------------------------------------
 
-// Logowanie — jedyny endpoint bez autoryzacji
-app.post('/api/login', async (req, res) => {
+app.get('/', (req, res) => {
+  res.send('Serwer vPKM działa poprawnie!');
+});
+
+// Logowanie z osobnym, ostrzejszym rate limiterem
+app.post('/api/login', loginLimiter, async (req, res) => {
   const { login, password } = req.body;
   const user = users.find(u => u.login === login);
 
@@ -94,7 +133,6 @@ app.post('/api/login', async (req, res) => {
     return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
   }
 
-  // Generujemy token JWT ważny 8 godzin
   const token = jwt.sign(
     { id: user.id, role: user.role, displayName: user.displayName },
     SECRET,
@@ -105,16 +143,10 @@ app.post('/api/login', async (req, res) => {
   res.json({ success: true, user: safeUser, token });
 });
 
-// Główna strona — informacja że serwer działa
-app.get('/', (req, res) => {
-  res.send('Serwer vPKM działa poprawnie!');
-});
-
 // ---------------------------------------------------------
 // 🚀 ENDPOINTY CHRONIONE — KIEROWCA I ADMIN
 // ---------------------------------------------------------
 
-// Pobieranie listy kierowców (kierowca też może widzieć listę)
 app.get('/api/drivers', requireAuth, (req, res) => {
   const drivers = users
     .filter(u => u.role === 'driver')
@@ -122,9 +154,7 @@ app.get('/api/drivers', requireAuth, (req, res) => {
   res.json(drivers);
 });
 
-// Kierowca: pobieranie swojej służby
 app.get('/api/shifts/:driverId', requireAuth, (req, res) => {
-  // Kierowca może pobierać tylko swoją służbę, admin może pobierać każdą
   if (req.user.role === 'driver' && req.user.id !== req.params.driverId) {
     return res.status(403).json({ error: 'Możesz sprawdzać tylko swoją służbę' });
   }
@@ -133,7 +163,6 @@ app.get('/api/shifts/:driverId', requireAuth, (req, res) => {
   res.json({ shift: myShift || null });
 });
 
-// Kierowca: wysłanie raportu
 app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
@@ -160,7 +189,6 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) =>
 // 🚀 ENDPOINTY CHRONIONE — TYLKO ADMIN
 // ---------------------------------------------------------
 
-// Admin: dodawanie nowego kierowcy
 app.post('/api/drivers', requireAdmin, async (req, res) => {
   const { login, password, displayName } = req.body;
 
@@ -168,7 +196,6 @@ app.post('/api/drivers', requireAdmin, async (req, res) => {
     return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
   }
 
-  // Hashujemy hasło przed zapisem
   const hashedPassword = await bcrypt.hash(password, 10);
 
   const newDriver = {
@@ -184,7 +211,6 @@ app.post('/api/drivers', requireAdmin, async (req, res) => {
   res.json({ success: true, driver: safeDriver });
 });
 
-// Admin: wystawianie służby
 app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
   const data = req.body;
   const file = req.file;
@@ -208,23 +234,19 @@ app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
   res.json({ success: true, shift: newShift });
 });
 
-// Admin: lista wszystkich aktywnych służb
 app.get('/api/shifts', requireAdmin, (req, res) => {
   res.json({ shifts: shifts.filter(s => s.status === 'active') });
 });
 
-// Admin: anulowanie służby
 app.delete('/api/shifts/:driverId', requireAdmin, (req, res) => {
   shifts = shifts.filter(s => s.driverId !== req.params.driverId);
   res.json({ success: true });
 });
 
-// Admin: lista raportów do weryfikacji
 app.get('/api/reports/pending', requireAdmin, (req, res) => {
   res.json({ reports: reports.filter(r => r.status === 'pending') });
 });
 
-// Admin: zatwierdzenie/odrzucenie raportu
 app.post('/api/reports/:id/status', requireAdmin, (req, res) => {
   const reportId = parseInt(req.params.id);
   const action = req.body.action;
