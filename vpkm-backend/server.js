@@ -82,17 +82,52 @@ async function initDb() {
       bus_number TEXT NOT NULL,
       model TEXT NOT NULL,
       assigned_driver_id TEXT DEFAULT '',
-      assigned_driver_name TEXT DEFAULT 'Brak'
+      assigned_driver_name TEXT DEFAULT 'Brak',
+      brand TEXT DEFAULT '',
+      vehicle_type TEXT DEFAULT '',
+      fleet_type TEXT DEFAULT '',
+      status TEXT DEFAULT 'sprawny',
+      year_manufactured TEXT DEFAULT '',
+      registration_number TEXT DEFAULT '',
+      notes TEXT DEFAULT ''
     );
+  `);
+
+  // Migracja: dodaj nowe kolumny jeśli tabela już istnieje (upgrade bez utraty danych)
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='fleet' AND column_name='brand') THEN
+        ALTER TABLE fleet ADD COLUMN brand TEXT DEFAULT '';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='fleet' AND column_name='vehicle_type') THEN
+        ALTER TABLE fleet ADD COLUMN vehicle_type TEXT DEFAULT '';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='fleet' AND column_name='fleet_type') THEN
+        ALTER TABLE fleet ADD COLUMN fleet_type TEXT DEFAULT '';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='fleet' AND column_name='status') THEN
+        ALTER TABLE fleet ADD COLUMN status TEXT DEFAULT 'sprawny';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='fleet' AND column_name='year_manufactured') THEN
+        ALTER TABLE fleet ADD COLUMN year_manufactured TEXT DEFAULT '';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='fleet' AND column_name='registration_number') THEN
+        ALTER TABLE fleet ADD COLUMN registration_number TEXT DEFAULT '';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='fleet' AND column_name='notes') THEN
+        ALTER TABLE fleet ADD COLUMN notes TEXT DEFAULT '';
+      END IF;
+    END$$;
   `);
 
   // Domyślny tabor jeśli tabela pusta
   const fleetCount = await pool.query('SELECT COUNT(*) FROM fleet');
   if (parseInt(fleetCount.rows[0].count) === 0) {
     await pool.query(`
-      INSERT INTO fleet (id, bus_number, model, assigned_driver_id, assigned_driver_name) VALUES
-      ('bus-1', '421', 'Solaris Urbino 18', '', 'Brak'),
-      ('bus-2', '105', 'MAN Lion''s City', '', 'Brak')
+      INSERT INTO fleet (id, bus_number, model, assigned_driver_id, assigned_driver_name, brand, vehicle_type, fleet_type, status, year_manufactured, registration_number, notes) VALUES
+      ('bus-1', '421', 'Urbino 18', '', 'Brak', 'Solaris', 'Autobus przegubowy', 'miejski', 'sprawny', '2019', 'SY 12345', ''),
+      ('bus-2', '105', 'Lion''s City', '', 'Brak', 'MAN', 'Autobus standardowy', 'miejski', 'sprawny', '2017', 'SY 67890', '')
     `);
   }
 
@@ -327,13 +362,27 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), async (req, r
   res.json({ success: true });
 });
 
+// ---------------------------------------------------------
+// 🚌 FLEET — pomocnicza funkcja mapowania wiersza DB → obiekt
+// ---------------------------------------------------------
+const mapFleetRow = (b) => ({
+  id: b.id,
+  busNumber: b.bus_number,
+  model: b.model,
+  assignedDriverId: b.assigned_driver_id,
+  assignedDriverName: b.assigned_driver_name,
+  brand: b.brand || '',
+  vehicleType: b.vehicle_type || '',
+  fleetType: b.fleet_type || '',
+  status: b.status || 'sprawny',
+  yearManufactured: b.year_manufactured || '',
+  registrationNumber: b.registration_number || '',
+  notes: b.notes || ''
+});
+
 app.get('/api/fleet', requireAuth, async (req, res) => {
   const result = await pool.query('SELECT * FROM fleet ORDER BY bus_number');
-  res.json(result.rows.map(b => ({
-    id: b.id, busNumber: b.bus_number, model: b.model,
-    assignedDriverId: b.assigned_driver_id,
-    assignedDriverName: b.assigned_driver_name
-  })));
+  res.json(result.rows.map(mapFleetRow));
 });
 
 // ---------------------------------------------------------
@@ -404,34 +453,59 @@ app.get('/api/files/:filename', requireAuth, async (req, res) => {
 // 🚀 ENDPOINTY CHRONIONE — TYLKO ADMIN
 // ---------------------------------------------------------
 app.post('/api/fleet', requireAdmin, async (req, res) => {
-  const { busNumber, model, assignedDriverId, assignedDriverName } = req.body;
+  const {
+    busNumber, model, assignedDriverId, assignedDriverName,
+    brand, vehicleType, fleetType, status,
+    yearManufactured, registrationNumber, notes
+  } = req.body;
   const id = 'bus-' + Date.now();
 
   await pool.query(
-    'INSERT INTO fleet (id, bus_number, model, assigned_driver_id, assigned_driver_name) VALUES ($1,$2,$3,$4,$5)',
-    [id, busNumber, model, assignedDriverId || '', assignedDriverName || 'Brak']
+    `INSERT INTO fleet
+      (id, bus_number, model, assigned_driver_id, assigned_driver_name,
+       brand, vehicle_type, fleet_type, status, year_manufactured, registration_number, notes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      id, busNumber, model,
+      assignedDriverId || '', assignedDriverName || 'Brak',
+      brand || '', vehicleType || '', fleetType || '',
+      status || 'sprawny', yearManufactured || '',
+      registrationNumber || '', notes || ''
+    ]
   );
 
-  res.json({ success: true, vehicle: { id, busNumber, model, assignedDriverId, assignedDriverName } });
+  const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
+  res.json({ success: true, vehicle: mapFleetRow(result.rows[0]) });
 });
 
 app.put('/api/fleet/:id', requireAdmin, async (req, res) => {
-  const { busNumber, model, assignedDriverId, assignedDriverName } = req.body;
+  const {
+    busNumber, model, assignedDriverId, assignedDriverName,
+    brand, vehicleType, fleetType, status,
+    yearManufactured, registrationNumber, notes
+  } = req.body;
 
   const result = await pool.query(
-    'UPDATE fleet SET bus_number=$1, model=$2, assigned_driver_id=$3, assigned_driver_name=$4 WHERE id=$5 RETURNING *',
-    [busNumber, model, assignedDriverId || '', assignedDriverName || 'Brak', req.params.id]
+    `UPDATE fleet SET
+      bus_number=$1, model=$2, assigned_driver_id=$3, assigned_driver_name=$4,
+      brand=$5, vehicle_type=$6, fleet_type=$7, status=$8,
+      year_manufactured=$9, registration_number=$10, notes=$11
+     WHERE id=$12 RETURNING *`,
+    [
+      busNumber, model,
+      assignedDriverId || '', assignedDriverName || 'Brak',
+      brand || '', vehicleType || '', fleetType || '',
+      status || 'sprawny', yearManufactured || '',
+      registrationNumber || '', notes || '',
+      req.params.id
+    ]
   );
 
   if (result.rows.length === 0) {
     return res.status(404).json({ error: 'Nie znaleziono takiego pojazdu w bazie taboru!' });
   }
 
-  const b = result.rows[0];
-  res.json({ success: true, vehicle: {
-    id: b.id, busNumber: b.bus_number, model: b.model,
-    assignedDriverId: b.assigned_driver_id, assignedDriverName: b.assigned_driver_name
-  }});
+  res.json({ success: true, vehicle: mapFleetRow(result.rows[0]) });
 });
 
 app.delete('/api/fleet/:id', requireAdmin, async (req, res) => {
@@ -497,21 +571,18 @@ app.delete('/api/shifts/:driverId', requireAdmin, async (req, res) => {
   res.json({ success: true });
 });
 
-// 1. USUWANIE KIEROWCY
+// USUWANIE KIEROWCY
 app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
 
-  // Usuń powiązane służby i raporty
   await pool.query('DELETE FROM shifts WHERE driver_id = $1', [id]);
   await pool.query('DELETE FROM reports WHERE driver_id = $1', [id]);
 
-  // Odepnij kierowcę od taboru
   await pool.query(
     'UPDATE fleet SET assigned_driver_id = $1, assigned_driver_name = $2 WHERE assigned_driver_id = $3',
     ['', 'Brak', id]
   );
 
-  // Usuń użytkownika
   const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [id]);
 
   if (result.rows.length === 0) {
