@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/server_messages.js << 'ENDOFFILE'
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -454,4 +453,3 @@ async function startServer() {
 }
 
 startServer();
-ENDOFFILE
