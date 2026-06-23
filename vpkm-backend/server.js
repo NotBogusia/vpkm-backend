@@ -256,7 +256,7 @@ app.get('/api/files/:filename', requireAuth, (req, res) => {
 // Zdjęcia tablic są widoczne dla każdego zalogowanego (kierowca i admin
 // mają wgląd w tabor), więc requireAuth jest wystarczające — bez
 // dodatkowej weryfikacji właściciela jak przy plikach PDF.
-app.get('/api/plate-images/:filename', requireAuth, (req, res) => {
+app.get('/api/plate-images/:filename', (req, res) => {
   const filename = req.params.filename;
   if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
     return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
