@@ -104,70 +104,70 @@ async function initDB() {
       login TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL,
       role TEXT NOT NULL DEFAULT 'driver',
-      "displayName" TEXT NOT NULL
+      display_name TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS fleet (
       id TEXT PRIMARY KEY,
-      "busNumber" TEXT,
+      bus_number TEXT,
       brand TEXT,
       model TEXT,
-      "vehicleType" TEXT,
+      vehicle_type TEXT,
       status TEXT DEFAULT 'eksploatowany',
-      "yearManufactured" TEXT,
-      "assignedDriverId" TEXT DEFAULT '',
-      "assignedDriverName" TEXT DEFAULT 'Brak',
+      year_manufactured TEXT,
+      assigned_driver_id TEXT DEFAULT '',
+      assigned_driver_name TEXT DEFAULT 'Brak',
       notes TEXT DEFAULT '',
-      "plateImageUrl" TEXT DEFAULT ''
+      plate_image_url TEXT DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS shifts (
       id BIGINT PRIMARY KEY,
-      "driverId" TEXT,
-      "driverName" TEXT,
+      driver_id TEXT,
+      driver_name TEXT,
       line TEXT,
       brigade TEXT,
       bus TEXT,
-      "startTime" TEXT,
-      "endTime" TEXT,
-      "pdfUrl" TEXT,
+      start_time TEXT,
+      end_time TEXT,
+      pdf_url TEXT,
       status TEXT DEFAULT 'active',
-      "createdAt" TIMESTAMPTZ DEFAULT NOW()
+      created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS reports (
       id BIGINT PRIMARY KEY,
-      "driverId" TEXT,
-      "driverName" TEXT,
+      driver_id TEXT,
+      driver_name TEXT,
       line TEXT,
       date TEXT,
-      "pdfUrl" TEXT,
-      "originalName" TEXT,
+      pdf_url TEXT,
+      original_name TEXT,
       status TEXT DEFAULT 'pending'
     );
 
     CREATE TABLE IF NOT EXISTS messages (
       id BIGINT PRIMARY KEY,
-      "fromId" TEXT,
-      "fromName" TEXT,
-      "toId" TEXT,
-      "toName" TEXT,
+      from_id TEXT,
+      from_name TEXT,
+      to_id TEXT,
+      to_name TEXT,
       content TEXT,
-      "createdAt" TIMESTAMPTZ DEFAULT NOW(),
-      "is_global" BOOLEAN DEFAULT FALSE
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      is_global BOOLEAN DEFAULT FALSE
     );
 
     CREATE TABLE IF NOT EXISTS message_reads (
-      "messageId" BIGINT,
-      "userId" TEXT,
-      PRIMARY KEY ("messageId", "userId")
+      message_id BIGINT,
+      user_id TEXT,
+      PRIMARY KEY (message_id, user_id)
     );
   `);
   console.log('✅ Tabele zainicjalizowane');
 }
 
 // ---------------------------------------------------------
-// 🚀 ENDPOINTY PUBLICZNE
+// 🚀 PUBLICZNE
 // ---------------------------------------------------------
 app.get('/', (req, res) => res.send('Serwer vPKM działa poprawnie!'));
 
@@ -179,10 +179,10 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     if (!user) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
-    const token = jwt.sign({ id: user.id, role: user.role, displayName: user.displayName || user.displayname }, SECRET, { expiresIn: '8h' });
+    const token = jwt.sign({ id: user.id, role: user.role, displayName: user.display_name }, SECRET, { expiresIn: '8h' });
     res.json({
       success: true,
-      user: { id: user.id, login: user.login, role: user.role, displayName: user.displayName || user.displayname },
+      user: { id: user.id, login: user.login, role: user.role, displayName: user.display_name },
       token
     });
   } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Błąd serwera' }); }
@@ -193,24 +193,36 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 // ---------------------------------------------------------
 app.get('/api/drivers', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, login, "displayName" FROM users WHERE role = $1', ['driver']);
-    res.json(result.rows.map(d => ({ id: d.id, login: d.login, displayName: d.displayName || d.displayname })));
+    const result = await pool.query('SELECT id, login, display_name FROM users WHERE role = $1', ['driver']);
+    res.json(result.rows.map(d => ({ id: d.id, login: d.login, displayName: d.display_name })));
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.get('/api/shifts/:driverId', requireAuth, async (req, res) => {
   if (req.user.role === 'driver' && req.user.id !== req.params.driverId) return res.status(403).json({ error: 'Możesz sprawdzać tylko swoją służbę' });
   try {
-    const result = await pool.query('SELECT * FROM shifts WHERE "driverId" = $1 AND status = $2', [req.params.driverId, 'active']);
-    res.json({ shift: result.rows[0] || null });
+    const result = await pool.query('SELECT * FROM shifts WHERE driver_id = $1 AND status = $2', [req.params.driverId, 'active']);
+    const shift = result.rows[0];
+    if (!shift) return res.json({ shift: null });
+    res.json({ shift: {
+      id: shift.id, driverId: shift.driver_id, driverName: shift.driver_name,
+      line: shift.line, brigade: shift.brigade, bus: shift.bus,
+      startTime: shift.start_time, endTime: shift.end_time,
+      pdfUrl: shift.pdf_url, status: shift.status
+    }});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.get('/api/shifts/history/:driverId', requireAuth, async (req, res) => {
   if (req.user.role === 'driver' && req.user.id !== req.params.driverId) return res.status(403).json({ error: 'Brak dostępu' });
   try {
-    const result = await pool.query('SELECT * FROM shifts WHERE "driverId" = $1 AND status != $2 ORDER BY "createdAt" DESC LIMIT 20', [req.params.driverId, 'active']);
-    res.json({ history: result.rows });
+    const result = await pool.query('SELECT * FROM shifts WHERE driver_id = $1 AND status != $2 ORDER BY created_at DESC LIMIT 20', [req.params.driverId, 'active']);
+    res.json({ history: result.rows.map(s => ({
+      id: s.id, driverId: s.driver_id, driverName: s.driver_name,
+      line: s.line, brigade: s.brigade, bus: s.bus,
+      startTime: s.start_time, endTime: s.end_time,
+      pdfUrl: s.pdf_url, status: s.status
+    }))});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -219,29 +231,24 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), async (req, r
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
   try {
     const id = Date.now();
-    const newReport = {
-      id,
-      driverId: req.body.driverId,
-      driverName: req.body.driverName,
-      line: req.body.line,
-      date: new Date().toLocaleString('pl-PL'),
-      pdfUrl: `/api/files/${file.filename}`,
-      originalName: file.originalname,
-      status: 'pending'
-    };
     await pool.query(
-      'INSERT INTO reports (id, "driverId", "driverName", line, date, "pdfUrl", "originalName", status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-      [id, newReport.driverId, newReport.driverName, newReport.line, newReport.date, newReport.pdfUrl, newReport.originalName, 'pending']
+      'INSERT INTO reports (id, driver_id, driver_name, line, date, pdf_url, original_name, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [id, req.body.driverId, req.body.driverName, req.body.line, new Date().toLocaleString('pl-PL'), `/api/files/${file.filename}`, file.originalname, 'pending']
     );
-    await pool.query('UPDATE shifts SET status = $1 WHERE "driverId" = $2 AND status = $3', ['completed', req.body.driverId, 'active']);
+    await pool.query('UPDATE shifts SET status = $1 WHERE driver_id = $2 AND status = $3', ['completed', req.body.driverId, 'active']);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.get('/api/fleet', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM fleet ORDER BY "busNumber"');
-    res.json(result.rows);
+    const result = await pool.query('SELECT * FROM fleet ORDER BY bus_number');
+    res.json(result.rows.map(v => ({
+      id: v.id, busNumber: v.bus_number, brand: v.brand, model: v.model,
+      vehicleType: v.vehicle_type, status: v.status, yearManufactured: v.year_manufactured,
+      assignedDriverId: v.assigned_driver_id, assignedDriverName: v.assigned_driver_name,
+      notes: v.notes, plateImageUrl: v.plate_image_url
+    })));
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -268,8 +275,8 @@ app.get('/api/files/:filename', requireAuth, async (req, res) => {
   if (req.user.role === 'admin') return res.sendFile(filePath);
   const relativeUrl = `/api/files/${filename}`;
   try {
-    const shiftResult = await pool.query('SELECT id FROM shifts WHERE "pdfUrl" = $1 AND "driverId" = $2', [relativeUrl, req.user.id]);
-    const reportResult = await pool.query('SELECT id FROM reports WHERE "pdfUrl" = $1 AND "driverId" = $2', [relativeUrl, req.user.id]);
+    const shiftResult = await pool.query('SELECT id FROM shifts WHERE pdf_url = $1 AND driver_id = $2', [relativeUrl, req.user.id]);
+    const reportResult = await pool.query('SELECT id FROM reports WHERE pdf_url = $1 AND driver_id = $2', [relativeUrl, req.user.id]);
     if (shiftResult.rows.length > 0 || reportResult.rows.length > 0) return res.sendFile(filePath);
     return res.status(403).json({ error: 'Brak dostępu do tego pliku' });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
@@ -293,11 +300,17 @@ app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), asy
   const plateImageUrl = file ? `/api/plate-images/${file.filename}` : '';
   try {
     await pool.query(
-      `INSERT INTO fleet (id, "busNumber", brand, model, "vehicleType", status, "yearManufactured", "assignedDriverId", "assignedDriverName", notes, "plateImageUrl") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      'INSERT INTO fleet (id, bus_number, brand, model, vehicle_type, status, year_manufactured, assigned_driver_id, assigned_driver_name, notes, plate_image_url) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
       [id, busNumber || '', brand || '', model || '', vehicleType || '', status || 'eksploatowany', yearManufactured || '', assignedDriverId || '', assignedDriverName || 'Brak', notes || '', plateImageUrl]
     );
     const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
-    res.json({ success: true, vehicle: result.rows[0] });
+    const v = result.rows[0];
+    res.json({ success: true, vehicle: {
+      id: v.id, busNumber: v.bus_number, brand: v.brand, model: v.model,
+      vehicleType: v.vehicle_type, status: v.status, yearManufactured: v.year_manufactured,
+      assignedDriverId: v.assigned_driver_id, assignedDriverName: v.assigned_driver_name,
+      notes: v.notes, plateImageUrl: v.plate_image_url
+    }});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -308,13 +321,19 @@ app.put('/api/fleet/:id', requireAdmin, uploadPlateImage.single('plate_image'), 
   try {
     const existing = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
     if (existing.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono pojazdu' });
-    const plateImageUrl = file ? `/api/plate-images/${file.filename}` : existing.rows[0].plateImageUrl;
+    const plateImageUrl = file ? `/api/plate-images/${file.filename}` : existing.rows[0].plate_image_url;
     await pool.query(
-      `UPDATE fleet SET "busNumber"=$1, brand=$2, model=$3, "vehicleType"=$4, status=$5, "yearManufactured"=$6, "assignedDriverId"=$7, "assignedDriverName"=$8, notes=$9, "plateImageUrl"=$10 WHERE id=$11`,
+      'UPDATE fleet SET bus_number=$1, brand=$2, model=$3, vehicle_type=$4, status=$5, year_manufactured=$6, assigned_driver_id=$7, assigned_driver_name=$8, notes=$9, plate_image_url=$10 WHERE id=$11',
       [busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId || '', assignedDriverName || 'Brak', notes, plateImageUrl, id]
     );
     const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
-    res.json({ success: true, vehicle: result.rows[0] });
+    const v = result.rows[0];
+    res.json({ success: true, vehicle: {
+      id: v.id, busNumber: v.bus_number, brand: v.brand, model: v.model,
+      vehicleType: v.vehicle_type, status: v.status, yearManufactured: v.year_manufactured,
+      assignedDriverId: v.assigned_driver_id, assignedDriverName: v.assigned_driver_name,
+      notes: v.notes, plateImageUrl: v.plate_image_url
+    }});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -332,7 +351,7 @@ app.post('/api/drivers', requireAdmin, async (req, res) => {
     if (existing.rows.length > 0) return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
     const hashedPassword = await bcrypt.hash(password, 10);
     const id = 'driver-' + Date.now();
-    await pool.query('INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)', [id, login, hashedPassword, 'driver', displayName]);
+    await pool.query('INSERT INTO users (id, login, password, role, display_name) VALUES ($1,$2,$3,$4,$5)', [id, login, hashedPassword, 'driver', displayName]);
     res.json({ success: true, driver: { id, login, displayName, role: 'driver' } });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
@@ -343,7 +362,7 @@ app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
     const result = await pool.query('SELECT id FROM users WHERE id = $1 AND role = $2', [id, 'driver']);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
-    await pool.query('UPDATE fleet SET "assignedDriverId" = $1, "assignedDriverName" = $2 WHERE "assignedDriverId" = $3', ['', 'Brak', id]);
+    await pool.query('UPDATE fleet SET assigned_driver_id = $1, assigned_driver_name = $2 WHERE assigned_driver_id = $3', ['', 'Brak', id]);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
@@ -352,27 +371,38 @@ app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), async (req, res
   const data = req.body;
   const file = req.file;
   try {
-    await pool.query('UPDATE shifts SET status = $1 WHERE "driverId" = $2 AND status = $3', ['cancelled', data.driverId, 'active']);
+    await pool.query('UPDATE shifts SET status = $1 WHERE driver_id = $2 AND status = $3', ['cancelled', data.driverId, 'active']);
     const id = Date.now();
     await pool.query(
-      `INSERT INTO shifts (id, "driverId", "driverName", line, brigade, bus, "startTime", "endTime", "pdfUrl", status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      'INSERT INTO shifts (id, driver_id, driver_name, line, brigade, bus, start_time, end_time, pdf_url, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
       [id, data.driverId, data.driverName, data.line, data.brigade, data.bus, data.startTime, data.endTime, file ? `/api/files/${file.filename}` : null, 'active']
     );
     const result = await pool.query('SELECT * FROM shifts WHERE id = $1', [id]);
-    res.json({ success: true, shift: result.rows[0] });
+    const s = result.rows[0];
+    res.json({ success: true, shift: {
+      id: s.id, driverId: s.driver_id, driverName: s.driver_name,
+      line: s.line, brigade: s.brigade, bus: s.bus,
+      startTime: s.start_time, endTime: s.end_time,
+      pdfUrl: s.pdf_url, status: s.status
+    }});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.get('/api/shifts', requireAdmin, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM shifts WHERE status = $1 ORDER BY "createdAt" DESC', ['active']);
-    res.json({ shifts: result.rows });
+    const result = await pool.query('SELECT * FROM shifts WHERE status = $1 ORDER BY created_at DESC', ['active']);
+    res.json({ shifts: result.rows.map(s => ({
+      id: s.id, driverId: s.driver_id, driverName: s.driver_name,
+      line: s.line, brigade: s.brigade, bus: s.bus,
+      startTime: s.start_time, endTime: s.end_time,
+      pdfUrl: s.pdf_url, status: s.status
+    }))});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.delete('/api/shifts/:driverId', requireAdmin, async (req, res) => {
   try {
-    await pool.query('UPDATE shifts SET status = $1 WHERE "driverId" = $2 AND status = $3', ['cancelled', req.params.driverId, 'active']);
+    await pool.query('UPDATE shifts SET status = $1 WHERE driver_id = $2 AND status = $3', ['cancelled', req.params.driverId, 'active']);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
@@ -380,7 +410,11 @@ app.delete('/api/shifts/:driverId', requireAdmin, async (req, res) => {
 app.get('/api/reports/pending', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM reports WHERE status = $1 ORDER BY id DESC', ['pending']);
-    res.json({ reports: result.rows });
+    res.json({ reports: result.rows.map(r => ({
+      id: r.id, driverId: r.driver_id, driverName: r.driver_name,
+      line: r.line, date: r.date, pdfUrl: r.pdf_url,
+      originalName: r.original_name, status: r.status
+    }))});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -388,8 +422,7 @@ app.post('/api/reports/:id/status', requireAdmin, async (req, res) => {
   const reportId = parseInt(req.params.id);
   const action = req.body.action;
   try {
-    const status = action === 'approve' ? 'approved' : 'rejected';
-    await pool.query('UPDATE reports SET status = $1 WHERE id = $2', [status, reportId]);
+    await pool.query('UPDATE reports SET status = $1 WHERE id = $2', [action === 'approve' ? 'approved' : 'rejected', reportId]);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
@@ -401,11 +434,15 @@ app.get('/api/messages', requireAuth, async (req, res) => {
   const userId = req.user.id;
   try {
     const result = await pool.query(
-      `SELECT m.*, EXISTS(SELECT 1 FROM message_reads r WHERE r."messageId" = m.id AND r."userId" = $1) as "isRead"
-       FROM messages m WHERE m."is_global" = true OR m."toId" = $1 ORDER BY m.id DESC LIMIT 50`,
+      `SELECT m.*, EXISTS(SELECT 1 FROM message_reads r WHERE r.message_id = m.id AND r.user_id = $1) as "isRead"
+       FROM messages m WHERE m.is_global = true OR m.to_id = $1 ORDER BY m.id DESC LIMIT 50`,
       [userId]
     );
-    res.json({ messages: result.rows });
+    res.json({ messages: result.rows.map(m => ({
+      id: m.id, fromId: m.from_id, fromName: m.from_name,
+      toId: m.to_id, toName: m.to_name, content: m.content,
+      createdAt: m.created_at, isGlobal: m.is_global, isRead: m.isRead
+    }))});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -413,7 +450,7 @@ app.get('/api/messages/unread-count', requireAuth, async (req, res) => {
   const userId = req.user.id;
   try {
     const result = await pool.query(
-      `SELECT COUNT(*) FROM messages m WHERE (m."is_global" = true OR m."toId" = $1) AND NOT EXISTS(SELECT 1 FROM message_reads r WHERE r."messageId" = m.id AND r."userId" = $1)`,
+      `SELECT COUNT(*) FROM messages m WHERE (m.is_global = true OR m.to_id = $1) AND NOT EXISTS(SELECT 1 FROM message_reads r WHERE r.message_id = m.id AND r.user_id = $1)`,
       [userId]
     );
     res.json({ count: parseInt(result.rows[0].count) });
@@ -424,7 +461,7 @@ app.post('/api/messages/:id/read', requireAuth, async (req, res) => {
   const userId = req.user.id;
   const messageId = parseInt(req.params.id);
   try {
-    await pool.query('INSERT INTO message_reads ("messageId", "userId") VALUES ($1,$2) ON CONFLICT DO NOTHING', [messageId, userId]);
+    await pool.query('INSERT INTO message_reads (message_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [messageId, userId]);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
@@ -433,7 +470,7 @@ app.post('/api/messages/read-all', requireAuth, async (req, res) => {
   const userId = req.user.id;
   try {
     await pool.query(
-      `INSERT INTO message_reads ("messageId", "userId") SELECT m.id, $1 FROM messages m WHERE (m."is_global" = true OR m."toId" = $1) ON CONFLICT DO NOTHING`,
+      `INSERT INTO message_reads (message_id, user_id) SELECT m.id, $1 FROM messages m WHERE (m.is_global = true OR m.to_id = $1) ON CONFLICT DO NOTHING`,
       [userId]
     );
     res.json({ success: true });
@@ -446,7 +483,7 @@ app.post('/api/messages', requireAdmin, async (req, res) => {
   try {
     const id = Date.now();
     await pool.query(
-      `INSERT INTO messages (id, "fromId", "fromName", "toId", "toName", content, "is_global") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      'INSERT INTO messages (id, from_id, from_name, to_id, to_name, content, is_global) VALUES ($1,$2,$3,$4,$5,$6,$7)',
       [id, req.user.id, req.user.displayName, isGlobal ? null : toId, isGlobal ? null : toName, content.trim(), !!isGlobal]
     );
     res.json({ success: true });
@@ -456,7 +493,7 @@ app.post('/api/messages', requireAdmin, async (req, res) => {
 app.delete('/api/messages/:id', requireAdmin, async (req, res) => {
   const messageId = parseInt(req.params.id);
   try {
-    await pool.query('DELETE FROM message_reads WHERE "messageId" = $1', [messageId]);
+    await pool.query('DELETE FROM message_reads WHERE message_id = $1', [messageId]);
     await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
@@ -465,7 +502,11 @@ app.delete('/api/messages/:id', requireAdmin, async (req, res) => {
 app.get('/api/messages/all', requireAdmin, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM messages ORDER BY id DESC LIMIT 100');
-    res.json({ messages: result.rows });
+    res.json({ messages: result.rows.map(m => ({
+      id: m.id, fromId: m.from_id, fromName: m.from_name,
+      toId: m.to_id, toName: m.to_name, content: m.content,
+      createdAt: m.created_at, isGlobal: m.is_global
+    }))});
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -488,7 +529,7 @@ async function startServer() {
   const adminExists = await pool.query('SELECT id FROM users WHERE login = $1', ['admin']);
   if (adminExists.rows.length === 0) {
     const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
-    await pool.query('INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)', ['admin-1', 'admin', adminPasswordHash, 'admin', 'Centrala vPKM']);
+    await pool.query('INSERT INTO users (id, login, password, role, display_name) VALUES ($1,$2,$3,$4,$5)', ['admin-1', 'admin', adminPasswordHash, 'admin', 'Centrala vPKM']);
     console.log('✅ Konto admina utworzone');
   }
   app.listen(PORT, () => {
