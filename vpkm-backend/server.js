@@ -154,7 +154,7 @@ async function initDB() {
       "toName" TEXT,
       content TEXT,
       "createdAt" TIMESTAMPTZ DEFAULT NOW(),
-      "isGlobal" BOOLEAN DEFAULT FALSE
+      "is_global" BOOLEAN DEFAULT FALSE
     );
 
     CREATE TABLE IF NOT EXISTS message_reads (
@@ -402,7 +402,7 @@ app.get('/api/messages', requireAuth, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT m.*, EXISTS(SELECT 1 FROM message_reads r WHERE r."messageId" = m.id AND r."userId" = $1) as "isRead"
-       FROM messages m WHERE m."isGlobal" = true OR m."toId" = $1 ORDER BY m.id DESC LIMIT 50`,
+       FROM messages m WHERE m."is_global" = true OR m."toId" = $1 ORDER BY m.id DESC LIMIT 50`,
       [userId]
     );
     res.json({ messages: result.rows });
@@ -413,7 +413,7 @@ app.get('/api/messages/unread-count', requireAuth, async (req, res) => {
   const userId = req.user.id;
   try {
     const result = await pool.query(
-      `SELECT COUNT(*) FROM messages m WHERE (m."isGlobal" = true OR m."toId" = $1) AND NOT EXISTS(SELECT 1 FROM message_reads r WHERE r."messageId" = m.id AND r."userId" = $1)`,
+      `SELECT COUNT(*) FROM messages m WHERE (m."is_global" = true OR m."toId" = $1) AND NOT EXISTS(SELECT 1 FROM message_reads r WHERE r."messageId" = m.id AND r."userId" = $1)`,
       [userId]
     );
     res.json({ count: parseInt(result.rows[0].count) });
@@ -433,7 +433,7 @@ app.post('/api/messages/read-all', requireAuth, async (req, res) => {
   const userId = req.user.id;
   try {
     await pool.query(
-      `INSERT INTO message_reads ("messageId", "userId") SELECT m.id, $1 FROM messages m WHERE (m."isGlobal" = true OR m."toId" = $1) ON CONFLICT DO NOTHING`,
+      `INSERT INTO message_reads ("messageId", "userId") SELECT m.id, $1 FROM messages m WHERE (m."is_global" = true OR m."toId" = $1) ON CONFLICT DO NOTHING`,
       [userId]
     );
     res.json({ success: true });
@@ -446,7 +446,7 @@ app.post('/api/messages', requireAdmin, async (req, res) => {
   try {
     const id = Date.now();
     await pool.query(
-      `INSERT INTO messages (id, "fromId", "fromName", "toId", "toName", content, "isGlobal") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      `INSERT INTO messages (id, "fromId", "fromName", "toId", "toName", content, "is_global") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [id, req.user.id, req.user.displayName, isGlobal ? null : toId, isGlobal ? null : toName, content.trim(), !!isGlobal]
     );
     res.json({ success: true });
