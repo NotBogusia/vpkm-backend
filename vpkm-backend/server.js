@@ -7,25 +7,31 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ---------------------------------------------------------
-// 🔑 SEKRETY Z ZMIENNYCH ŚRODOWISKOWYCH
+// 🔑 SEKRETY
 // ---------------------------------------------------------
 const SECRET = process.env.JWT_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-if (!SECRET) {
-  console.error('❌ BŁĄD KRYTYCZNY: zmienna środowiskowa JWT_SECRET nie jest ustawiona.');
-  process.exit(1);
-}
-if (!ADMIN_PASSWORD) {
-  console.error('❌ BŁĄD KRYTYCZNY: zmienna środowiskowa ADMIN_PASSWORD nie jest ustawiona.');
-  process.exit(1);
-}
+if (!SECRET) { console.error('❌ Brak JWT_SECRET'); process.exit(1); }
+if (!ADMIN_PASSWORD) { console.error('❌ Brak ADMIN_PASSWORD'); process.exit(1); }
 
+// ---------------------------------------------------------
+// 🗄️ POSTGRESQL
+// ---------------------------------------------------------
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// ---------------------------------------------------------
+// 🛡️ HELMET + TRUST PROXY
+// ---------------------------------------------------------
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
@@ -41,7 +47,7 @@ app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) { callback(null, true); }
     else {
-      console.warn(`⚠️  Zablokowane zapytanie CORS z pochodzenia: ${origin}`);
+      console.warn(`⚠️ Zablokowane CORS z: ${origin}`);
       callback(new Error('Niedozwolone pochodzenie (CORS)'));
     }
   },
@@ -52,70 +58,64 @@ app.use(cors({
 // ---------------------------------------------------------
 // 🚦 RATE LIMITING
 // ---------------------------------------------------------
-const globalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo zapytań. Spróbuj ponownie za chwilę.' } });
+const globalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo zapytań.' } });
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' } });
 
 app.use(globalLimiter);
 app.use(express.json());
 
+// ---------------------------------------------------------
+// 📁 FOLDERY
+// ---------------------------------------------------------
 const dir = './uploads';
 if (!fs.existsSync(dir)) fs.mkdirSync(dir);
-
 const plateDir = './uploads/plates';
 if (!fs.existsSync(plateDir)) fs.mkdirSync(plateDir, { recursive: true });
 
 // ---------------------------------------------------------
-// 📁 MULTER — PDF (raporty, rozkłady służb)
+// 📁 MULTER — PDF
 // ---------------------------------------------------------
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) { cb(null, 'uploads/'); },
-  filename: function (req, file, cb) {
+  destination: (req, file, cb) => cb(null, 'uploads/'),
+  filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
     cb(null, uniqueSuffix + '-' + safeName);
   }
 });
-
 const pdfFileFilter = (req, file, cb) => {
   const isPdfMime = file.mimetype === 'application/pdf';
   const isPdfExt = path.extname(file.originalname).toLowerCase() === '.pdf';
-  if (isPdfMime && isPdfExt) { cb(null, true); }
-  else { cb(new Error('Tylko pliki PDF są dozwolone.')); }
+  if (isPdfMime && isPdfExt) cb(null, true);
+  else cb(new Error('Tylko pliki PDF są dozwolone.'));
 };
-
-const upload = multer({ storage: storage, limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: pdfFileFilter });
+const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: pdfFileFilter });
 
 // ---------------------------------------------------------
-// 📁 MULTER — zdjęcia tablic rejestracyjnych (JPG/PNG)
+// 📁 MULTER — zdjęcia tablic
 // ---------------------------------------------------------
 const plateStorage = multer.diskStorage({
-  destination: function (req, file, cb) { cb(null, 'uploads/plates/'); },
-  filename: function (req, file, cb) {
+  destination: (req, file, cb) => cb(null, 'uploads/plates/'),
+  filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
     cb(null, uniqueSuffix + '-' + safeName);
   }
 });
-
 const imageFileFilter = (req, file, cb) => {
   const allowedMimes = ['image/jpeg', 'image/png', 'image/jpg'];
   const allowedExts = ['.jpg', '.jpeg', '.png'];
-  const isImageMime = allowedMimes.includes(file.mimetype);
-  const isImageExt = allowedExts.includes(path.extname(file.originalname).toLowerCase());
-  if (isImageMime && isImageExt) { cb(null, true); }
-  else { cb(new Error('Tylko pliki JPG/PNG są dozwolone.')); }
+  if (allowedMimes.includes(file.mimetype) && allowedExts.includes(path.extname(file.originalname).toLowerCase())) cb(null, true);
+  else cb(new Error('Tylko pliki JPG/PNG są dozwolone.'));
 };
-
 const uploadPlateImage = multer({ storage: plateStorage, limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: imageFileFilter });
 
 // ---------------------------------------------------------
-// 🔐 MIDDLEWARE AUTORYZACJI JWT
+// 🔐 AUTORYZACJA JWT
 // ---------------------------------------------------------
 const requireAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Brak tokenu autoryzacji' });
-  }
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Brak tokenu autoryzacji' });
   const token = authHeader.split(' ')[1];
   try {
     req.user = jwt.verify(token, SECRET);
@@ -127,57 +127,89 @@ const requireAuth = (req, res, next) => {
 
 const requireAdmin = (req, res, next) => {
   requireAuth(req, res, () => {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Brak uprawnień administratora' });
-    }
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Brak uprawnień administratora' });
     next();
   });
 };
 
 // ---------------------------------------------------------
-// 🗄️ BAZA DANYCH (W RAM)
+// 🗄️ RAM — służby, raporty, wiadomości (nie wymagają trwałości)
 // ---------------------------------------------------------
-let users = [];
 let shifts = [];
 let reports = [];
+let messages = [];
+let messageReads = [];
 
-// 🆕 fleet z nowymi polami: vehicleType (skrót), status, plateImageUrl
-// (registrationNumber i fleetType — USUNIĘTE na życzenie)
-let fleet = [
-  { id: 'bus-1', busNumber: '421', brand: 'Solaris', model: 'Urbino 18', vehicleType: 'CN', status: 'eksploatowany', yearManufactured: '2019', assignedDriverId: '', assignedDriverName: 'Brak', notes: '', plateImageUrl: '' },
-  { id: 'bus-2', busNumber: '105', brand: 'MAN', model: "Lion's City", vehicleType: 'BN', status: 'eksploatowany', yearManufactured: '2017', assignedDriverId: '', assignedDriverName: 'Brak', notes: '', plateImageUrl: '' }
-];
+// ---------------------------------------------------------
+// 🗄️ INICJALIZACJA BAZY DANYCH
+// ---------------------------------------------------------
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      login TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'driver',
+      "displayName" TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS fleet (
+      id TEXT PRIMARY KEY,
+      "busNumber" TEXT,
+      brand TEXT,
+      model TEXT,
+      "vehicleType" TEXT,
+      status TEXT DEFAULT 'eksploatowany',
+      "yearManufactured" TEXT,
+      "assignedDriverId" TEXT DEFAULT '',
+      "assignedDriverName" TEXT DEFAULT 'Brak',
+      notes TEXT DEFAULT '',
+      "plateImageUrl" TEXT DEFAULT ''
+    );
+  `);
+  console.log('✅ Tabele zainicjalizowane');
+}
 
 // ---------------------------------------------------------
 // 🚀 ENDPOINTY PUBLICZNE
 // ---------------------------------------------------------
-app.get('/', (req, res) => { res.send('Serwer vPKM działa poprawnie!'); });
+app.get('/', (req, res) => res.send('Serwer vPKM działa poprawnie!'));
 
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { login, password } = req.body;
-  const user = users.find(u => u.login === login);
-  if (!user) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
-  const passwordMatch = await bcrypt.compare(password, user.password);
-  if (!passwordMatch) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
-  const token = jwt.sign({ id: user.id, role: user.role, displayName: user.displayName }, SECRET, { expiresIn: '8h' });
-  const { password: _, ...safeUser } = user;
-  res.json({ success: true, user: safeUser, token });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
+    const user = result.rows[0];
+    if (!user) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    const token = jwt.sign({ id: user.id, role: user.role, displayName: user.displayName }, SECRET, { expiresIn: '8h' });
+    const { password: _, ...safeUser } = user;
+    res.json({ success: true, user: safeUser, token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Błąd serwera' });
+  }
 });
 
 // ---------------------------------------------------------
 // 🚀 ENDPOINTY CHRONIONE — KIEROWCA I ADMIN
 // ---------------------------------------------------------
-app.get('/api/drivers', requireAuth, (req, res) => {
-  const drivers = users.filter(u => u.role === 'driver').map(d => ({ id: d.id, displayName: d.displayName, login: d.login }));
-  res.json(drivers);
+app.get('/api/drivers', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, login, "displayName" FROM users WHERE role = $1', ['driver']);
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
+  }
 });
 
 app.get('/api/shifts/:driverId', requireAuth, (req, res) => {
   if (req.user.role === 'driver' && req.user.id !== req.params.driverId) {
     return res.status(403).json({ error: 'Możesz sprawdzać tylko swoją służbę' });
   }
-  const driverId = req.params.driverId;
-  const myShift = shifts.find(s => s.driverId === driverId && s.status === 'active');
+  const myShift = shifts.find(s => s.driverId === req.params.driverId && s.status === 'active');
   res.json({ shift: myShift || null });
 });
 
@@ -192,7 +224,6 @@ app.get('/api/shifts/history/:driverId', requireAuth, (req, res) => {
 app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
-
   const newReport = {
     id: Date.now(),
     driverId: req.body.driverId,
@@ -203,32 +234,41 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) =>
     originalName: file.originalname,
     status: 'pending'
   };
-
   const shiftIndex = shifts.findIndex(s => s.driverId === req.body.driverId && s.status === 'active');
   if (shiftIndex > -1) shifts[shiftIndex].status = 'completed';
-
   reports.push(newReport);
   res.json({ success: true });
 });
 
-app.get('/api/fleet', requireAuth, (req, res) => {
-  res.json(fleet);
+app.get('/api/fleet', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM fleet ORDER BY "busNumber"');
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
+  }
 });
 
 // ---------------------------------------------------------
-// 🔑 ZMIANA HASŁA (własnego)
+// 🔑 ZMIANA HASŁA
 // ---------------------------------------------------------
 app.post('/api/change-password', requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
-  if (!newPassword || newPassword.length < 6) {
-    return res.status(400).json({ error: 'Nowe hasło musi mieć minimum 6 znaków' });
+  if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'Nowe hasło musi mieć minimum 6 znaków' });
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: 'Nie znaleziono użytkownika' });
+    const passwordMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!passwordMatch) return res.status(401).json({ error: 'Obecne hasło jest nieprawidłowe' });
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, req.user.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
   }
-  const user = users.find(u => u.id === req.user.id);
-  if (!user) return res.status(404).json({ error: 'Nie znaleziono użytkownika' });
-  const passwordMatch = await bcrypt.compare(currentPassword, user.password);
-  if (!passwordMatch) return res.status(401).json({ error: 'Obecne hasło jest nieprawidłowe' });
-  user.password = await bcrypt.hash(newPassword, 10);
-  res.json({ success: true });
 });
 
 // ---------------------------------------------------------
@@ -236,33 +276,23 @@ app.post('/api/change-password', requireAuth, async (req, res) => {
 // ---------------------------------------------------------
 app.get('/api/files/:filename', requireAuth, (req, res) => {
   const filename = req.params.filename;
-  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-    return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
-  }
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
   const filePath = path.join(__dirname, 'uploads', filename);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Plik nie istnieje' });
-
   if (req.user.role === 'admin') return res.sendFile(filePath);
-
   const relativeUrl = `/api/files/${filename}`;
   const ownsShift = shifts.some(s => s.pdfUrl === relativeUrl && s.driverId === req.user.id);
   const ownsReport = reports.some(r => r.pdfUrl === relativeUrl && r.driverId === req.user.id);
   if (ownsShift || ownsReport) return res.sendFile(filePath);
-
   return res.status(403).json({ error: 'Brak dostępu do tego pliku' });
 });
 
 // ---------------------------------------------------------
-// 🖼️ DOSTĘP DO ZDJĘĆ TABLIC REJESTRACYJNYCH
+// 🖼️ ZDJĘCIA TABLIC — PUBLICZNE
 // ---------------------------------------------------------
-// Zdjęcia tablic są widoczne dla każdego zalogowanego (kierowca i admin
-// mają wgląd w tabor), więc requireAuth jest wystarczające — bez
-// dodatkowej weryfikacji właściciela jak przy plikach PDF.
 app.get('/api/plate-images/:filename', (req, res) => {
   const filename = req.params.filename;
-  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
-    return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
-  }
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
   const filePath = path.join(__dirname, 'uploads', 'plates', filename);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Plik nie istnieje' });
   res.sendFile(filePath);
@@ -271,94 +301,93 @@ app.get('/api/plate-images/:filename', (req, res) => {
 // ---------------------------------------------------------
 // 🚀 ENDPOINTY CHRONIONE — TYLKO ADMIN
 // ---------------------------------------------------------
-
-// 🆕 Dodawanie pojazdu — teraz przyjmuje multipart/form-data
-// (bo formularz wysyła też plik plate_image)
-app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), (req, res) => {
+app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), async (req, res) => {
   const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
   const file = req.file;
-
-  const newVehicle = {
-    id: 'bus-' + Date.now(),
-    busNumber: busNumber || '',
-    brand: brand || '',
-    model: model || '',
-    vehicleType: vehicleType || '',
-    status: status || 'eksploatowany',
-    yearManufactured: yearManufactured || '',
-    assignedDriverId: assignedDriverId || '',
-    assignedDriverName: assignedDriverName || 'Brak',
-    notes: notes || '',
-    plateImageUrl: file ? `/api/plate-images/${file.filename}` : ''
-  };
-
-  fleet.push(newVehicle);
-  res.json({ success: true, vehicle: newVehicle });
-});
-
-// 🆕 Edycja pojazdu — też multipart/form-data, zachowuje stare zdjęcie
-// jeśli nowe nie zostało przesłane.
-app.put('/api/fleet/:id', requireAdmin, uploadPlateImage.single('plate_image'), (req, res) => {
-  const id = req.params.id;
-  const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
-  const file = req.file;
-  const index = fleet.findIndex(b => b.id === id);
-
-  if (index > -1) {
-    const oldPlateImageUrl = fleet[index].plateImageUrl;
-    fleet[index] = {
-      ...fleet[index],
-      busNumber: busNumber ?? fleet[index].busNumber,
-      brand: brand ?? fleet[index].brand,
-      model: model ?? fleet[index].model,
-      vehicleType: vehicleType ?? fleet[index].vehicleType,
-      status: status || fleet[index].status,
-      yearManufactured: yearManufactured ?? fleet[index].yearManufactured,
-      assignedDriverId: assignedDriverId || '',
-      assignedDriverName: assignedDriverName || 'Brak',
-      notes: notes ?? fleet[index].notes,
-      plateImageUrl: file ? `/api/plate-images/${file.filename}` : oldPlateImageUrl
-    };
-    res.json({ success: true, vehicle: fleet[index] });
-  } else {
-    res.status(404).json({ error: 'Nie znaleziono takiego pojazdu w bazie taboru!' });
+  const id = 'bus-' + Date.now();
+  const plateImageUrl = file ? `/api/plate-images/${file.filename}` : '';
+  try {
+    await pool.query(
+      `INSERT INTO fleet (id, "busNumber", brand, model, "vehicleType", status, "yearManufactured", "assignedDriverId", "assignedDriverName", notes, "plateImageUrl")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [id, busNumber || '', brand || '', model || '', vehicleType || '', status || 'eksploatowany', yearManufactured || '', assignedDriverId || '', assignedDriverName || 'Brak', notes || '', plateImageUrl]
+    );
+    const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
+    res.json({ success: true, vehicle: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
   }
 });
 
-app.delete('/api/fleet/:id', requireAdmin, (req, res) => {
-  const id = req.params.id;
-  fleet = fleet.filter(b => b.id !== id);
-  res.json({ success: true });
+app.put('/api/fleet/:id', requireAdmin, uploadPlateImage.single('plate_image'), async (req, res) => {
+  const { id } = req.params;
+  const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
+  const file = req.file;
+  try {
+    const existing = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono pojazdu' });
+    const oldPlateImageUrl = existing.rows[0].plateImageUrl;
+    const plateImageUrl = file ? `/api/plate-images/${file.filename}` : oldPlateImageUrl;
+    await pool.query(
+      `UPDATE fleet SET "busNumber"=$1, brand=$2, model=$3, "vehicleType"=$4, status=$5, "yearManufactured"=$6, "assignedDriverId"=$7, "assignedDriverName"=$8, notes=$9, "plateImageUrl"=$10 WHERE id=$11`,
+      [busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId || '', assignedDriverName || 'Brak', notes, plateImageUrl, id]
+    );
+    const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
+    res.json({ success: true, vehicle: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
+  }
+});
+
+app.delete('/api/fleet/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM fleet WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
+  }
 });
 
 app.post('/api/drivers', requireAdmin, async (req, res) => {
   const { login, password, displayName } = req.body;
-  if (users.some(u => u.login === login)) {
-    return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
+  try {
+    const existing = await pool.query('SELECT id FROM users WHERE login = $1', [login]);
+    if (existing.rows.length > 0) return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const id = 'driver-' + Date.now();
+    await pool.query(
+      'INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)',
+      [id, login, hashedPassword, 'driver', displayName]
+    );
+    res.json({ success: true, driver: { id, login, displayName, role: 'driver' } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
   }
-  const hashedPassword = await bcrypt.hash(password, 10);
-  const newDriver = { id: 'driver-' + Date.now(), login, password: hashedPassword, role: 'driver', displayName };
-  users.push(newDriver);
-  const { password: _, ...safeDriver } = newDriver;
-  res.json({ success: true, driver: safeDriver });
 });
 
-app.delete('/api/drivers/:id', requireAdmin, (req, res) => {
-  const id = req.params.id;
-  const index = users.findIndex(u => u.id === id && u.role === 'driver');
-  if (index === -1) return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
-  users.splice(index, 1);
-  shifts = shifts.filter(s => s.driverId !== id);
-  fleet.forEach(v => { if (v.assignedDriverId === id) { v.assignedDriverId = ''; v.assignedDriverName = 'Brak'; } });
-  res.json({ success: true });
+app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query('SELECT id FROM users WHERE id = $1 AND role = $2', [id, 'driver']);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
+    await pool.query('DELETE FROM users WHERE id = $1', [id]);
+    shifts = shifts.filter(s => s.driverId !== id);
+    await pool.query('UPDATE fleet SET "assignedDriverId" = $1, "assignedDriverName" = $2 WHERE "assignedDriverId" = $3', ['', 'Brak', id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Błąd serwera' });
+  }
 });
 
 app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
   const data = req.body;
   const file = req.file;
-
   shifts = shifts.filter(s => s.driverId !== data.driverId || s.status !== 'active');
-
   const newShift = {
     id: Date.now(),
     driverId: data.driverId,
@@ -371,7 +400,6 @@ app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
     pdfUrl: file ? `/api/files/${file.filename}` : null,
     status: 'active'
   };
-
   shifts.push(newShift);
   res.json({ success: true, shift: newShift });
 });
@@ -402,18 +430,12 @@ app.post('/api/reports/:id/status', requireAdmin, (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 💬 KOMUNIKATY (w RAM)
+// 💬 KOMUNIKATY (RAM)
 // ---------------------------------------------------------
-let messages = [];
-let messageReads = []; // { messageId, userId }
-
 app.get('/api/messages', requireAuth, (req, res) => {
   const userId = req.user.id;
   const visible = messages.filter(m => m.isGlobal || m.toId === userId);
-  const withReadFlag = visible
-    .slice()
-    .sort((a, b) => b.id - a.id)
-    .slice(0, 50)
+  const withReadFlag = visible.slice().sort((a, b) => b.id - a.id).slice(0, 50)
     .map(m => ({ ...m, isRead: messageReads.some(r => r.messageId === m.id && r.userId === userId) }));
   res.json({ messages: withReadFlag });
 });
@@ -448,7 +470,6 @@ app.post('/api/messages/read-all', requireAuth, (req, res) => {
 app.post('/api/messages', requireAdmin, (req, res) => {
   const { toId, toName, content, isGlobal } = req.body;
   if (!content || !content.trim()) return res.status(400).json({ error: 'Treść komunikatu nie może być pusta' });
-
   const newMessage = {
     id: Date.now(),
     fromId: req.user.id,
@@ -459,7 +480,6 @@ app.post('/api/messages', requireAdmin, (req, res) => {
     createdAt: new Date().toISOString(),
     isGlobal: !!isGlobal
   };
-
   messages.push(newMessage);
   res.json({ success: true });
 });
@@ -477,18 +497,12 @@ app.get('/api/messages/all', requireAdmin, (req, res) => {
 });
 
 // ---------------------------------------------------------
-// ⚠️ CENTRALNY HANDLER BŁĘDÓW
+// ⚠️ HANDLER BŁĘDÓW
 // ---------------------------------------------------------
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    return res.status(400).json({ error: 'Błąd przesyłania pliku: ' + err.message });
-  }
-  if (err && (err.message === 'Tylko pliki PDF są dozwolone.' || err.message === 'Tylko pliki JPG/PNG są dozwolone.')) {
-    return res.status(400).json({ error: err.message });
-  }
-  if (err && err.message === 'Niedozwolone pochodzenie (CORS)') {
-    return res.status(403).json({ error: 'Ta domena nie ma dostępu do API' });
-  }
+  if (err instanceof multer.MulterError) return res.status(400).json({ error: 'Błąd przesyłania pliku: ' + err.message });
+  if (err && (err.message === 'Tylko pliki PDF są dozwolone.' || err.message === 'Tylko pliki JPG/PNG są dozwolone.')) return res.status(400).json({ error: err.message });
+  if (err && err.message === 'Niedozwolone pochodzenie (CORS)') return res.status(403).json({ error: 'Ta domena nie ma dostępu do API' });
   console.error(err);
   res.status(500).json({ error: 'Wewnętrzny błąd serwera' });
 });
@@ -497,8 +511,18 @@ app.use((err, req, res, next) => {
 // 🚀 START SERWERA
 // ---------------------------------------------------------
 async function startServer() {
-  const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
-  users.push({ id: 'admin-1', login: 'admin', password: adminPasswordHash, role: 'admin', displayName: 'Centrala vPKM' });
+  await initDB();
+
+  // Stwórz admina jeśli nie istnieje
+  const adminExists = await pool.query('SELECT id FROM users WHERE login = $1', ['admin']);
+  if (adminExists.rows.length === 0) {
+    const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
+    await pool.query(
+      'INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)',
+      ['admin-1', 'admin', adminPasswordHash, 'admin', 'Centrala vPKM']
+    );
+    console.log('✅ Konto admina utworzone');
+  }
 
   app.listen(PORT, () => {
     console.log(`✅ Serwer uruchomiony na porcie: ${PORT}`);
