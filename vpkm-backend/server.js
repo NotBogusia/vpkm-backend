@@ -206,7 +206,12 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 app.get('/api/drivers', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, login, "displayName" FROM users WHERE role = $1', ['driver']);
-    res.json(result.rows);
+    const drivers = result.rows.map(d => ({
+      id: d.id,
+      login: d.login,
+      displayName: d.displayName || d.displayname
+    }));
+    res.json(drivers);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Błąd serwera' });
