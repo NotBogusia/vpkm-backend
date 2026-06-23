@@ -12,69 +12,43 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ---------------------------------------------------------
-// 🔑 SEKRETY
-// ---------------------------------------------------------
 const SECRET = process.env.JWT_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
 if (!SECRET) { console.error('❌ Brak JWT_SECRET'); process.exit(1); }
 if (!ADMIN_PASSWORD) { console.error('❌ Brak ADMIN_PASSWORD'); process.exit(1); }
 
-// ---------------------------------------------------------
-// 🗄️ POSTGRESQL
-// ---------------------------------------------------------
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// ---------------------------------------------------------
-// 🛡️ HELMET + TRUST PROXY
-// ---------------------------------------------------------
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' }
-}));
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 app.set('trust proxy', 1);
 
-// ---------------------------------------------------------
-// 🌐 CORS
-// ---------------------------------------------------------
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) { callback(null, true); }
-    else {
-      console.warn(`⚠️ Zablokowane CORS z: ${origin}`);
-      callback(new Error('Niedozwolone pochodzenie (CORS)'));
-    }
+    else { console.warn(`⚠️ Zablokowane CORS z: ${origin}`); callback(new Error('Niedozwolone pochodzenie (CORS)')); }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// ---------------------------------------------------------
-// 🚦 RATE LIMITING
-// ---------------------------------------------------------
 const globalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo zapytań.' } });
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' } });
 
 app.use(globalLimiter);
 app.use(express.json());
 
-// ---------------------------------------------------------
-// 📁 FOLDERY
-// ---------------------------------------------------------
 const dir = './uploads';
 if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 const plateDir = './uploads/plates';
 if (!fs.existsSync(plateDir)) fs.mkdirSync(plateDir, { recursive: true });
 
-// ---------------------------------------------------------
-// 📁 MULTER — PDF
-// ---------------------------------------------------------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
   filename: (req, file, cb) => {
@@ -84,16 +58,11 @@ const storage = multer.diskStorage({
   }
 });
 const pdfFileFilter = (req, file, cb) => {
-  const isPdfMime = file.mimetype === 'application/pdf';
-  const isPdfExt = path.extname(file.originalname).toLowerCase() === '.pdf';
-  if (isPdfMime && isPdfExt) cb(null, true);
+  if (file.mimetype === 'application/pdf' && path.extname(file.originalname).toLowerCase() === '.pdf') cb(null, true);
   else cb(new Error('Tylko pliki PDF są dozwolone.'));
 };
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: pdfFileFilter });
 
-// ---------------------------------------------------------
-// 📁 MULTER — zdjęcia tablic
-// ---------------------------------------------------------
 const plateStorage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/plates/'),
   filename: (req, file, cb) => {
@@ -110,19 +79,12 @@ const imageFileFilter = (req, file, cb) => {
 };
 const uploadPlateImage = multer({ storage: plateStorage, limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: imageFileFilter });
 
-// ---------------------------------------------------------
-// 🔐 AUTORYZACJA JWT
-// ---------------------------------------------------------
 const requireAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Brak tokenu autoryzacji' });
   const token = authHeader.split(' ')[1];
-  try {
-    req.user = jwt.verify(token, SECRET);
-    next();
-  } catch {
-    return res.status(401).json({ error: 'Token nieprawidłowy lub wygasł' });
-  }
+  try { req.user = jwt.verify(token, SECRET); next(); }
+  catch { return res.status(401).json({ error: 'Token nieprawidłowy lub wygasł' }); }
 };
 
 const requireAdmin = (req, res, next) => {
@@ -133,15 +95,7 @@ const requireAdmin = (req, res, next) => {
 };
 
 // ---------------------------------------------------------
-// 🗄️ RAM — służby, raporty, wiadomości (nie wymagają trwałości)
-// ---------------------------------------------------------
-let shifts = [];
-let reports = [];
-let messages = [];
-let messageReads = [];
-
-// ---------------------------------------------------------
-// 🗄️ INICJALIZACJA BAZY DANYCH
+// 🗄️ INICJALIZACJA BAZY
 // ---------------------------------------------------------
 async function initDB() {
   await pool.query(`
@@ -166,6 +120,48 @@ async function initDB() {
       notes TEXT DEFAULT '',
       "plateImageUrl" TEXT DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS shifts (
+      id BIGINT PRIMARY KEY,
+      "driverId" TEXT,
+      "driverName" TEXT,
+      line TEXT,
+      brigade TEXT,
+      bus TEXT,
+      "startTime" TEXT,
+      "endTime" TEXT,
+      "pdfUrl" TEXT,
+      status TEXT DEFAULT 'active',
+      "createdAt" TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS reports (
+      id BIGINT PRIMARY KEY,
+      "driverId" TEXT,
+      "driverName" TEXT,
+      line TEXT,
+      date TEXT,
+      "pdfUrl" TEXT,
+      "originalName" TEXT,
+      status TEXT DEFAULT 'pending'
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id BIGINT PRIMARY KEY,
+      "fromId" TEXT,
+      "fromName" TEXT,
+      "toId" TEXT,
+      "toName" TEXT,
+      content TEXT,
+      "createdAt" TIMESTAMPTZ DEFAULT NOW(),
+      "isGlobal" BOOLEAN DEFAULT FALSE
+    );
+
+    CREATE TABLE IF NOT EXISTS message_reads (
+      "messageId" BIGINT,
+      "userId" TEXT,
+      PRIMARY KEY ("messageId", "userId")
+    );
   `);
   console.log('✅ Tabele zainicjalizowane');
 }
@@ -183,89 +179,72 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     if (!user) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
-    const token = jwt.sign({ id: user.id, role: user.role, displayName: user.displayName }, SECRET, { expiresIn: '8h' });
+    const token = jwt.sign({ id: user.id, role: user.role, displayName: user.displayName || user.displayname }, SECRET, { expiresIn: '8h' });
     res.json({
-  success: true,
-  user: {
-    id: user.id,
-    login: user.login,
-    role: user.role,
-    displayName: user.displayName || user.display_name
-  },
-  token
-});
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Błąd serwera' });
-  }
+      success: true,
+      user: { id: user.id, login: user.login, role: user.role, displayName: user.displayName || user.displayname },
+      token
+    });
+  } catch (err) { console.error(err); res.status(500).json({ success: false, message: 'Błąd serwera' }); }
 });
 
 // ---------------------------------------------------------
-// 🚀 ENDPOINTY CHRONIONE — KIEROWCA I ADMIN
+// 🚀 KIEROWCA I ADMIN
 // ---------------------------------------------------------
 app.get('/api/drivers', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT id, login, "displayName" FROM users WHERE role = $1', ['driver']);
-    const drivers = result.rows.map(d => ({
-      id: d.id,
-      login: d.login,
-      displayName: d.displayName || d.displayname
-    }));
-    res.json(drivers);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+    res.json(result.rows.map(d => ({ id: d.id, login: d.login, displayName: d.displayName || d.displayname })));
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.get('/api/shifts/:driverId', requireAuth, (req, res) => {
-  if (req.user.role === 'driver' && req.user.id !== req.params.driverId) {
-    return res.status(403).json({ error: 'Możesz sprawdzać tylko swoją służbę' });
-  }
-  const myShift = shifts.find(s => s.driverId === req.params.driverId && s.status === 'active');
-  res.json({ shift: myShift || null });
+app.get('/api/shifts/:driverId', requireAuth, async (req, res) => {
+  if (req.user.role === 'driver' && req.user.id !== req.params.driverId) return res.status(403).json({ error: 'Możesz sprawdzać tylko swoją służbę' });
+  try {
+    const result = await pool.query('SELECT * FROM shifts WHERE "driverId" = $1 AND status = $2', [req.params.driverId, 'active']);
+    res.json({ shift: result.rows[0] || null });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.get('/api/shifts/history/:driverId', requireAuth, (req, res) => {
-  if (req.user.role === 'driver' && req.user.id !== req.params.driverId) {
-    return res.status(403).json({ error: 'Brak dostępu' });
-  }
-  const history = shifts.filter(s => s.driverId === req.params.driverId && s.status !== 'active').slice(-20).reverse();
-  res.json({ history });
+app.get('/api/shifts/history/:driverId', requireAuth, async (req, res) => {
+  if (req.user.role === 'driver' && req.user.id !== req.params.driverId) return res.status(403).json({ error: 'Brak dostępu' });
+  try {
+    const result = await pool.query('SELECT * FROM shifts WHERE "driverId" = $1 AND status != $2 ORDER BY "createdAt" DESC LIMIT 20', [req.params.driverId, 'active']);
+    res.json({ history: result.rows });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/reports', requireAuth, upload.single('report_pdf'), (req, res) => {
+app.post('/api/reports', requireAuth, upload.single('report_pdf'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
-  const newReport = {
-    id: Date.now(),
-    driverId: req.body.driverId,
-    driverName: req.body.driverName,
-    line: req.body.line,
-    date: new Date().toLocaleString('pl-PL'),
-    pdfUrl: `/api/files/${file.filename}`,
-    originalName: file.originalname,
-    status: 'pending'
-  };
-  const shiftIndex = shifts.findIndex(s => s.driverId === req.body.driverId && s.status === 'active');
-  if (shiftIndex > -1) shifts[shiftIndex].status = 'completed';
-  reports.push(newReport);
-  res.json({ success: true });
+  try {
+    const id = Date.now();
+    const newReport = {
+      id,
+      driverId: req.body.driverId,
+      driverName: req.body.driverName,
+      line: req.body.line,
+      date: new Date().toLocaleString('pl-PL'),
+      pdfUrl: `/api/files/${file.filename}`,
+      originalName: file.originalname,
+      status: 'pending'
+    };
+    await pool.query(
+      'INSERT INTO reports (id, "driverId", "driverName", line, date, "pdfUrl", "originalName", status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [id, newReport.driverId, newReport.driverName, newReport.line, newReport.date, newReport.pdfUrl, newReport.originalName, 'pending']
+    );
+    await pool.query('UPDATE shifts SET status = $1 WHERE "driverId" = $2 AND status = $3', ['completed', req.body.driverId, 'active']);
+    res.json({ success: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.get('/api/fleet', requireAuth, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM fleet ORDER BY "busNumber"');
     res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-// ---------------------------------------------------------
-// 🔑 ZMIANA HASŁA
-// ---------------------------------------------------------
 app.post('/api/change-password', requireAuth, async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'Nowe hasło musi mieć minimum 6 znaków' });
@@ -278,31 +257,24 @@ app.post('/api/change-password', requireAuth, async (req, res) => {
     const hashed = await bcrypt.hash(newPassword, 10);
     await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashed, req.user.id]);
     res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-// ---------------------------------------------------------
-// 📥 CHRONIONY DOSTĘP DO PLIKÓW PDF
-// ---------------------------------------------------------
-app.get('/api/files/:filename', requireAuth, (req, res) => {
+app.get('/api/files/:filename', requireAuth, async (req, res) => {
   const filename = req.params.filename;
   if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
   const filePath = path.join(__dirname, 'uploads', filename);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Plik nie istnieje' });
   if (req.user.role === 'admin') return res.sendFile(filePath);
   const relativeUrl = `/api/files/${filename}`;
-  const ownsShift = shifts.some(s => s.pdfUrl === relativeUrl && s.driverId === req.user.id);
-  const ownsReport = reports.some(r => r.pdfUrl === relativeUrl && r.driverId === req.user.id);
-  if (ownsShift || ownsReport) return res.sendFile(filePath);
-  return res.status(403).json({ error: 'Brak dostępu do tego pliku' });
+  try {
+    const shiftResult = await pool.query('SELECT id FROM shifts WHERE "pdfUrl" = $1 AND "driverId" = $2', [relativeUrl, req.user.id]);
+    const reportResult = await pool.query('SELECT id FROM reports WHERE "pdfUrl" = $1 AND "driverId" = $2', [relativeUrl, req.user.id]);
+    if (shiftResult.rows.length > 0 || reportResult.rows.length > 0) return res.sendFile(filePath);
+    return res.status(403).json({ error: 'Brak dostępu do tego pliku' });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-// ---------------------------------------------------------
-// 🖼️ ZDJĘCIA TABLIC — PUBLICZNE
-// ---------------------------------------------------------
 app.get('/api/plate-images/:filename', (req, res) => {
   const filename = req.params.filename;
   if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
@@ -312,7 +284,7 @@ app.get('/api/plate-images/:filename', (req, res) => {
 });
 
 // ---------------------------------------------------------
-// 🚀 ENDPOINTY CHRONIONE — TYLKO ADMIN
+// 🚀 TYLKO ADMIN
 // ---------------------------------------------------------
 app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), async (req, res) => {
   const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
@@ -321,16 +293,12 @@ app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), asy
   const plateImageUrl = file ? `/api/plate-images/${file.filename}` : '';
   try {
     await pool.query(
-      `INSERT INTO fleet (id, "busNumber", brand, model, "vehicleType", status, "yearManufactured", "assignedDriverId", "assignedDriverName", notes, "plateImageUrl")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      `INSERT INTO fleet (id, "busNumber", brand, model, "vehicleType", status, "yearManufactured", "assignedDriverId", "assignedDriverName", notes, "plateImageUrl") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [id, busNumber || '', brand || '', model || '', vehicleType || '', status || 'eksploatowany', yearManufactured || '', assignedDriverId || '', assignedDriverName || 'Brak', notes || '', plateImageUrl]
     );
     const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
     res.json({ success: true, vehicle: result.rows[0] });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.put('/api/fleet/:id', requireAdmin, uploadPlateImage.single('plate_image'), async (req, res) => {
@@ -340,28 +308,21 @@ app.put('/api/fleet/:id', requireAdmin, uploadPlateImage.single('plate_image'), 
   try {
     const existing = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
     if (existing.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono pojazdu' });
-    const oldPlateImageUrl = existing.rows[0].plateImageUrl;
-    const plateImageUrl = file ? `/api/plate-images/${file.filename}` : oldPlateImageUrl;
+    const plateImageUrl = file ? `/api/plate-images/${file.filename}` : existing.rows[0].plateImageUrl;
     await pool.query(
       `UPDATE fleet SET "busNumber"=$1, brand=$2, model=$3, "vehicleType"=$4, status=$5, "yearManufactured"=$6, "assignedDriverId"=$7, "assignedDriverName"=$8, notes=$9, "plateImageUrl"=$10 WHERE id=$11`,
       [busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId || '', assignedDriverName || 'Brak', notes, plateImageUrl, id]
     );
     const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
     res.json({ success: true, vehicle: result.rows[0] });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.delete('/api/fleet/:id', requireAdmin, async (req, res) => {
   try {
     await pool.query('DELETE FROM fleet WHERE id = $1', [req.params.id]);
     res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.post('/api/drivers', requireAdmin, async (req, res) => {
@@ -371,15 +332,9 @@ app.post('/api/drivers', requireAdmin, async (req, res) => {
     if (existing.rows.length > 0) return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
     const hashedPassword = await bcrypt.hash(password, 10);
     const id = 'driver-' + Date.now();
-    await pool.query(
-      'INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)',
-      [id, login, hashedPassword, 'driver', displayName]
-    );
+    await pool.query('INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)', [id, login, hashedPassword, 'driver', displayName]);
     res.json({ success: true, driver: { id, login, displayName, role: 'driver' } });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
@@ -388,125 +343,130 @@ app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
     const result = await pool.query('SELECT id FROM users WHERE id = $1 AND role = $2', [id, 'driver']);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
-    shifts = shifts.filter(s => s.driverId !== id);
     await pool.query('UPDATE fleet SET "assignedDriverId" = $1, "assignedDriverName" = $2 WHERE "assignedDriverId" = $3', ['', 'Brak', id]);
     res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Błąd serwera' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), (req, res) => {
+app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), async (req, res) => {
   const data = req.body;
   const file = req.file;
-  shifts = shifts.filter(s => s.driverId !== data.driverId || s.status !== 'active');
-  const newShift = {
-    id: Date.now(),
-    driverId: data.driverId,
-    driverName: data.driverName,
-    line: data.line,
-    brigade: data.brigade,
-    bus: data.bus,
-    startTime: data.startTime,
-    endTime: data.endTime,
-    pdfUrl: file ? `/api/files/${file.filename}` : null,
-    status: 'active'
-  };
-  shifts.push(newShift);
-  res.json({ success: true, shift: newShift });
+  try {
+    await pool.query('UPDATE shifts SET status = $1 WHERE "driverId" = $2 AND status = $3', ['cancelled', data.driverId, 'active']);
+    const id = Date.now();
+    await pool.query(
+      `INSERT INTO shifts (id, "driverId", "driverName", line, brigade, bus, "startTime", "endTime", "pdfUrl", status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [id, data.driverId, data.driverName, data.line, data.brigade, data.bus, data.startTime, data.endTime, file ? `/api/files/${file.filename}` : null, 'active']
+    );
+    const result = await pool.query('SELECT * FROM shifts WHERE id = $1', [id]);
+    res.json({ success: true, shift: result.rows[0] });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.get('/api/shifts', requireAdmin, (req, res) => {
-  res.json({ shifts: shifts.filter(s => s.status === 'active') });
+app.get('/api/shifts', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM shifts WHERE status = $1 ORDER BY "createdAt" DESC', ['active']);
+    res.json({ shifts: result.rows });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.delete('/api/shifts/:driverId', requireAdmin, (req, res) => {
-  shifts = shifts.filter(s => !(s.driverId === req.params.driverId && s.status === 'active'));
-  res.json({ success: true });
+app.delete('/api/shifts/:driverId', requireAdmin, async (req, res) => {
+  try {
+    await pool.query('UPDATE shifts SET status = $1 WHERE "driverId" = $2 AND status = $3', ['cancelled', req.params.driverId, 'active']);
+    res.json({ success: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.get('/api/reports/pending', requireAdmin, (req, res) => {
-  res.json({ reports: reports.filter(r => r.status === 'pending') });
+app.get('/api/reports/pending', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM reports WHERE status = $1 ORDER BY id DESC', ['pending']);
+    res.json({ reports: result.rows });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/reports/:id/status', requireAdmin, (req, res) => {
+app.post('/api/reports/:id/status', requireAdmin, async (req, res) => {
   const reportId = parseInt(req.params.id);
   const action = req.body.action;
-  const reportIndex = reports.findIndex(r => r.id === reportId);
-  if (reportIndex > -1) {
-    reports[reportIndex].status = action === 'approve' ? 'approved' : 'rejected';
+  try {
+    const status = action === 'approve' ? 'approved' : 'rejected';
+    await pool.query('UPDATE reports SET status = $1 WHERE id = $2', [status, reportId]);
     res.json({ success: true });
-  } else {
-    res.status(404).json({ error: 'Nie znaleziono raportu' });
-  }
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 // ---------------------------------------------------------
-// 💬 KOMUNIKATY (RAM)
+// 💬 KOMUNIKATY
 // ---------------------------------------------------------
-app.get('/api/messages', requireAuth, (req, res) => {
+app.get('/api/messages', requireAuth, async (req, res) => {
   const userId = req.user.id;
-  const visible = messages.filter(m => m.isGlobal || m.toId === userId);
-  const withReadFlag = visible.slice().sort((a, b) => b.id - a.id).slice(0, 50)
-    .map(m => ({ ...m, isRead: messageReads.some(r => r.messageId === m.id && r.userId === userId) }));
-  res.json({ messages: withReadFlag });
+  try {
+    const result = await pool.query(
+      `SELECT m.*, EXISTS(SELECT 1 FROM message_reads r WHERE r."messageId" = m.id AND r."userId" = $1) as "isRead"
+       FROM messages m WHERE m."isGlobal" = true OR m."toId" = $1 ORDER BY m.id DESC LIMIT 50`,
+      [userId]
+    );
+    res.json({ messages: result.rows });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.get('/api/messages/unread-count', requireAuth, (req, res) => {
+app.get('/api/messages/unread-count', requireAuth, async (req, res) => {
   const userId = req.user.id;
-  const visible = messages.filter(m => m.isGlobal || m.toId === userId);
-  const unread = visible.filter(m => !messageReads.some(r => r.messageId === m.id && r.userId === userId));
-  res.json({ count: unread.length });
+  try {
+    const result = await pool.query(
+      `SELECT COUNT(*) FROM messages m WHERE (m."isGlobal" = true OR m."toId" = $1) AND NOT EXISTS(SELECT 1 FROM message_reads r WHERE r."messageId" = m.id AND r."userId" = $1)`,
+      [userId]
+    );
+    res.json({ count: parseInt(result.rows[0].count) });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/messages/:id/read', requireAuth, (req, res) => {
+app.post('/api/messages/:id/read', requireAuth, async (req, res) => {
   const userId = req.user.id;
   const messageId = parseInt(req.params.id);
-  if (!messageReads.some(r => r.messageId === messageId && r.userId === userId)) {
-    messageReads.push({ messageId, userId });
-  }
-  res.json({ success: true });
+  try {
+    await pool.query('INSERT INTO message_reads ("messageId", "userId") VALUES ($1,$2) ON CONFLICT DO NOTHING', [messageId, userId]);
+    res.json({ success: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/messages/read-all', requireAuth, (req, res) => {
+app.post('/api/messages/read-all', requireAuth, async (req, res) => {
   const userId = req.user.id;
-  const visible = messages.filter(m => m.isGlobal || m.toId === userId);
-  visible.forEach(m => {
-    if (!messageReads.some(r => r.messageId === m.id && r.userId === userId)) {
-      messageReads.push({ messageId: m.id, userId });
-    }
-  });
-  res.json({ success: true });
+  try {
+    await pool.query(
+      `INSERT INTO message_reads ("messageId", "userId") SELECT m.id, $1 FROM messages m WHERE (m."isGlobal" = true OR m."toId" = $1) ON CONFLICT DO NOTHING`,
+      [userId]
+    );
+    res.json({ success: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/messages', requireAdmin, (req, res) => {
+app.post('/api/messages', requireAdmin, async (req, res) => {
   const { toId, toName, content, isGlobal } = req.body;
   if (!content || !content.trim()) return res.status(400).json({ error: 'Treść komunikatu nie może być pusta' });
-  const newMessage = {
-    id: Date.now(),
-    fromId: req.user.id,
-    fromName: req.user.displayName,
-    toId: isGlobal ? null : toId,
-    toName: isGlobal ? null : toName,
-    content: content.trim(),
-    createdAt: new Date().toISOString(),
-    isGlobal: !!isGlobal
-  };
-  messages.push(newMessage);
-  res.json({ success: true });
+  try {
+    const id = Date.now();
+    await pool.query(
+      `INSERT INTO messages (id, "fromId", "fromName", "toId", "toName", content, "isGlobal") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [id, req.user.id, req.user.displayName, isGlobal ? null : toId, isGlobal ? null : toName, content.trim(), !!isGlobal]
+    );
+    res.json({ success: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.delete('/api/messages/:id', requireAdmin, (req, res) => {
+app.delete('/api/messages/:id', requireAdmin, async (req, res) => {
   const messageId = parseInt(req.params.id);
-  messages = messages.filter(m => m.id !== messageId);
-  messageReads = messageReads.filter(r => r.messageId !== messageId);
-  res.json({ success: true });
+  try {
+    await pool.query('DELETE FROM message_reads WHERE "messageId" = $1', [messageId]);
+    await pool.query('DELETE FROM messages WHERE id = $1', [messageId]);
+    res.json({ success: true });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.get('/api/messages/all', requireAdmin, (req, res) => {
-  const sorted = messages.slice().sort((a, b) => b.id - a.id).slice(0, 100);
-  res.json({ messages: sorted });
+app.get('/api/messages/all', requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM messages ORDER BY id DESC LIMIT 100');
+    res.json({ messages: result.rows });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 // ---------------------------------------------------------
@@ -521,22 +481,16 @@ app.use((err, req, res, next) => {
 });
 
 // ---------------------------------------------------------
-// 🚀 START SERWERA
+// 🚀 START
 // ---------------------------------------------------------
 async function startServer() {
   await initDB();
-
-  // Stwórz admina jeśli nie istnieje
   const adminExists = await pool.query('SELECT id FROM users WHERE login = $1', ['admin']);
   if (adminExists.rows.length === 0) {
     const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
-    await pool.query(
-      'INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)',
-      ['admin-1', 'admin', adminPasswordHash, 'admin', 'Centrala vPKM']
-    );
+    await pool.query('INSERT INTO users (id, login, password, role, "displayName") VALUES ($1,$2,$3,$4,$5)', ['admin-1', 'admin', adminPasswordHash, 'admin', 'Centrala vPKM']);
     console.log('✅ Konto admina utworzone');
   }
-
   app.listen(PORT, () => {
     console.log(`✅ Serwer uruchomiony na porcie: ${PORT}`);
     console.log(`   Dozwolone domeny CORS: ${allowedOrigins.join(', ')}`);
