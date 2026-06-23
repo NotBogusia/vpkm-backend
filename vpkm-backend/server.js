@@ -184,8 +184,16 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     const passwordMatch = await bcrypt.compare(password, user.password);
     if (!passwordMatch) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
     const token = jwt.sign({ id: user.id, role: user.role, displayName: user.displayName }, SECRET, { expiresIn: '8h' });
-    const { password: _, ...safeUser } = user;
-    res.json({ success: true, user: safeUser, token });
+    res.json({
+  success: true,
+  user: {
+    id: user.id,
+    login: user.login,
+    role: user.role,
+    displayName: user.displayName || user.display_name
+  },
+  token
+});
   } catch (err) {
     console.error(err);
     res.status(500).json({ success: false, message: 'Błąd serwera' });
