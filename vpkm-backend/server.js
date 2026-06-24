@@ -163,6 +163,18 @@ async function initDB() {
       PRIMARY KEY (message_id, user_id)
     );
   `);
+
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_number TEXT DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS roblox_nick TEXT DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS position TEXT DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS employment_status TEXT DEFAULT 'pracujacy';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS additional_info TEXT DEFAULT '';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS points INTEGER DEFAULT 0;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS minuses INTEGER DEFAULT 0;
+  `);
+
   console.log('✅ Tabele zainicjalizowane');
 }
 
@@ -193,8 +205,29 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 // ---------------------------------------------------------
 app.get('/api/drivers', requireAuth, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, login, display_name FROM users WHERE role = $1', ['driver']);
-    res.json(result.rows.map(d => ({ id: d.id, login: d.login, displayName: d.display_name })));
+    const result = await pool.query('SELECT * FROM users WHERE role = $1', ['driver']);
+    res.json(result.rows.map(d => ({
+      id: d.id, login: d.login, displayName: d.display_name,
+      employeeNumber: d.employee_number, fullName: d.full_name,
+      robloxNick: d.roblox_nick, position: d.position,
+      employmentStatus: d.employment_status, additionalInfo: d.additional_info,
+      points: d.points, minuses: d.minuses
+    })));
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
+app.get('/api/drivers/me', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+    const d = result.rows[0];
+    if (!d) return res.status(404).json({ error: 'Nie znaleziono użytkownika' });
+    res.json({
+      id: d.id, login: d.login, displayName: d.display_name,
+      employeeNumber: d.employee_number, fullName: d.full_name,
+      robloxNick: d.roblox_nick, position: d.position,
+      employmentStatus: d.employment_status, additionalInfo: d.additional_info,
+      points: d.points, minuses: d.minuses
+    });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -345,14 +378,33 @@ app.delete('/api/fleet/:id', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/drivers', requireAdmin, async (req, res) => {
-  const { login, password, displayName } = req.body;
+  const { login, password, displayName, employeeNumber, fullName, robloxNick, position, employmentStatus, additionalInfo, points, minuses } = req.body;
   try {
     const existing = await pool.query('SELECT id FROM users WHERE login = $1', [login]);
     if (existing.rows.length > 0) return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
     const hashedPassword = await bcrypt.hash(password, 10);
     const id = 'driver-' + Date.now();
-    await pool.query('INSERT INTO users (id, login, password, role, display_name) VALUES ($1,$2,$3,$4,$5)', [id, login, hashedPassword, 'driver', displayName]);
+    await pool.query(
+      `INSERT INTO users (id, login, password, role, display_name, employee_number, full_name, roblox_nick, position, employment_status, additional_info, points, minuses)
+       VALUES ($1,$2,$3,'driver',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [id, login, hashedPassword, displayName, employeeNumber || '', fullName || '', robloxNick || '', position || '', employmentStatus || 'pracujacy', additionalInfo || '', points || 0, minuses || 0]
+    );
     res.json({ success: true, driver: { id, login, displayName, role: 'driver' } });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
+app.put('/api/drivers/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { displayName, employeeNumber, fullName, robloxNick, position, employmentStatus, additionalInfo, points, minuses } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE users SET display_name=$1, employee_number=$2, full_name=$3, roblox_nick=$4,
+       position=$5, employment_status=$6, additional_info=$7, points=$8, minuses=$9
+       WHERE id=$10 AND role='driver' RETURNING *`,
+      [displayName, employeeNumber || '', fullName || '', robloxNick || '', position || '', employmentStatus || 'pracujacy', additionalInfo || '', points || 0, minuses || 0, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
+    res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
