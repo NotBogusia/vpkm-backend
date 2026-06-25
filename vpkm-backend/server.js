@@ -175,6 +175,10 @@ async function initDB() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS minuses INTEGER DEFAULT 0;
   `);
 
+  await pool.query(`
+  ALTER TABLE shifts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+`);
+
   console.log('✅ Tabele zainicjalizowane');
 }
 
