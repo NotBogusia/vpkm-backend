@@ -423,15 +423,16 @@ app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/shifts', requireAdmin, upload.single('pdf_file'), async (req, res) => {
-  const data = req.body;
-  const file = req.file;
+app.post('/api/shifts', requireAdmin, async (req, res) => {
+  const { driverId, driverName, line, brigade, bus, startTime, endTime, scheduleFile } = req.body;
   try {
-    await pool.query('UPDATE shifts SET status = $1 WHERE driver_id = $2 AND status = $3', ['cancelled', data.driverId, 'active']);
+    await pool.query('UPDATE shifts SET status = $1 WHERE driver_id = $2 AND status = $3', ['cancelled', driverId, 'active']);
     const id = Date.now();
+    // pdf_url teraz wskazuje na statyczny plik rozkładu (np. /weekend_2_1.pdf), nie na wgrany plik
+    const pdfUrl = scheduleFile ? `/${scheduleFile}` : null;
     await pool.query(
       'INSERT INTO shifts (id, driver_id, driver_name, line, brigade, bus, start_time, end_time, pdf_url, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
-      [id, data.driverId, data.driverName, data.line, data.brigade, data.bus, data.startTime, data.endTime, file ? `/api/files/${file.filename}` : null, 'active']
+      [id, driverId, driverName, line, brigade, bus, startTime, endTime, pdfUrl, 'active']
     );
     const result = await pool.query('SELECT * FROM shifts WHERE id = $1', [id]);
     const s = result.rows[0];
