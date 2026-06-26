@@ -178,6 +178,7 @@ async function initDB() {
   await pool.query(`
   ALTER TABLE shifts ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 `);
+await initSchedulesTable();
 
   console.log('✅ Tabele zainicjalizowane');
 }
@@ -564,6 +565,48 @@ app.get('/api/messages/all', requireAdmin, async (req, res) => {
       toId: m.to_id, toName: m.to_name, content: m.content,
       createdAt: m.created_at, isGlobal: m.is_global
     }))});
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
+// ---------------------------------------------------------
+// 📅 ROZKŁADY
+// ---------------------------------------------------------
+async function initSchedulesTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS schedules (
+      id BIGINT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      data JSONB NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+}
+
+app.get('/api/schedules', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM schedules ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
+app.post('/api/schedules', requireAdmin, async (req, res) => {
+  const { name, category, data } = req.body;
+  if (!name || !category || !data) return res.status(400).json({ error: 'Brak wymaganych pól' });
+  try {
+    const id = Date.now();
+    await pool.query(
+      'INSERT INTO schedules (id, name, category, data) VALUES ($1,$2,$3,$4)',
+      [id, name, category, JSON.stringify(data)]
+    );
+    res.json({ success: true, id });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
+app.delete('/api/schedules/:id', requireAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM schedules WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
