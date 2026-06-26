@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { randomUUID } = require('crypto');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -62,7 +63,7 @@ const globalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, standardH
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' } });
 
 app.use(globalLimiter);
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const dir = './uploads';
 if (!fs.existsSync(dir)) fs.mkdirSync(dir);
@@ -359,7 +360,7 @@ app.get('/api/plate-images/:filename', (req, res) => {
 app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), async (req, res) => {
   const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
   const file = req.file;
-  const id = 'bus-' + Date.now();
+  const id = 'bus-' + randomUUID();
   const plateImageUrl = file ? `/api/plate-images/${file.filename}` : '';
   try {
     await pool.query(
@@ -413,11 +414,20 @@ app.delete('/api/fleet/:id', requireAdmin, async (req, res) => {
 
 app.post('/api/drivers', requireAdmin, async (req, res) => {
   const { login, password, displayName, employeeNumber, fullName, robloxNick, position, employmentStatus, additionalInfo, points, minuses } = req.body;
+  if (!login || login.length < 3 || login.length > 50) {
+    return res.status(400).json({ error: 'Login musi mieć 3-50 znaków' });
+  }
+  if (!password || password.length < 6 || password.length > 100) {
+    return res.status(400).json({ error: 'Hasło musi mieć 6-100 znaków' });
+  }
+  if (!displayName || displayName.length < 2 || displayName.length > 100) {
+    return res.status(400).json({ error: 'Nazwa musi mieć 2-100 znaków' });
+  }
   try {
     const existing = await pool.query('SELECT id FROM users WHERE login = $1', [login]);
     if (existing.rows.length > 0) return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
     const hashedPassword = await bcrypt.hash(password, 10);
-    const id = 'driver-' + Date.now();
+    const id = 'driver-' + randomUUID();
     await pool.query(
       `INSERT INTO users (id, login, password, role, display_name, employee_number, full_name, roblox_nick, position, employment_status, additional_info, points, minuses)
        VALUES ($1,$2,$3,'driver',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
@@ -566,7 +576,12 @@ app.post('/api/messages/read-all', requireAuth, async (req, res) => {
 
 app.post('/api/messages', requireAdmin, async (req, res) => {
   const { toId, toName, content, isGlobal } = req.body;
-  if (!content || !content.trim()) return res.status(400).json({ error: 'Treść komunikatu nie może być pusta' });
+  if (!content || !content.trim()) {
+    return res.status(400).json({ error: 'Treść komunikatu nie może być pusta' });
+  }
+  if (content.length > 1000) {
+    return res.status(400).json({ error: 'Treść komunikatu nie może przekraczać 1000 znaków' });
+  }
   try {
     const id = Date.now();
     await pool.query(
@@ -621,7 +636,15 @@ app.get('/api/schedules', requireAuth, async (req, res) => {
 
 app.post('/api/schedules', requireAdmin, async (req, res) => {
   const { name, category, data } = req.body;
-  if (!name || !category || !data) return res.status(400).json({ error: 'Brak wymaganych pól' });
+  if (!name || name.length < 2 || name.length > 100) {
+    return res.status(400).json({ error: 'Nazwa rozkładu musi mieć 2-100 znaków' });
+  }
+  if (!category || !['weekday', 'saturday', 'sunday'].includes(category)) {
+    return res.status(400).json({ error: 'Nieprawidłowa kategoria' });
+  }
+  if (!data) {
+    return res.status(400).json({ error: 'Brak danych rozkładu' });
+  }
   try {
     const id = Date.now();
     await pool.query(
@@ -654,13 +677,28 @@ app.use((err, req, res, next) => {
 // 🚀 START
 // ---------------------------------------------------------
 async function startServer() {
-  await initDB();
-  const adminExists = await pool.query('SELECT id FROM users WHERE login = $1', ['admin']);
-  if (adminExists.rows.length === 0) {
-    const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
-    await pool.query('INSERT INTO users (id, login, password, role, display_name) VALUES ($1,$2,$3,$4,$5)', ['admin-1', 'admin', adminPasswordHash, 'admin', 'Centrala vPKM']);
-    console.log('✅ Konto admina utworzone');
+  try {
+    await initDB();
+  } catch (err) {
+    console.error('❌ Błąd inicjalizacji bazy danych:', err);
+    process.exit(1);
   }
+
+  try {
+    const adminExists = await pool.query('SELECT id FROM users WHERE login = $1', ['admin']);
+    if (adminExists.rows.length === 0) {
+      const adminPasswordHash = await bcrypt.hash(ADMIN_PASSWORD, 10);
+      await pool.query(
+        'INSERT INTO users (id, login, password, role, display_name) VALUES ($1,$2,$3,$4,$5)',
+        ['admin-1', 'admin', adminPasswordHash, 'admin', 'Centrala vPKM']
+      );
+      console.log('✅ Konto admina utworzone');
+    }
+  } catch (err) {
+    console.error('❌ Błąd tworzenia admina:', err);
+    process.exit(1);
+  }
+
   app.listen(PORT, () => {
     console.log(`✅ Serwer uruchomiony na porcie: ${PORT}`);
     console.log(`   Dozwolone domeny CORS: ${allowedOrigins.join(', ')}`);
