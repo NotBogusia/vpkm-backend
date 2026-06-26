@@ -8,12 +8,32 @@ const bcrypt = require('bcrypt');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const { Pool } = require('pg');
-
+const cloudinary = require('cloudinary').v2;
+const { Readable } = require('stream');
 const app = express();
 const PORT = process.env.PORT || 3001;
-
 const SECRET = process.env.JWT_SECRET;
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const uploadToCloudinary = (buffer, folder, resourceType = 'raw') => {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: resourceType },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    );
+    Readable.from(buffer).pipe(uploadStream);
+  });
+};
+
 
 if (!SECRET) { console.error('❌ Brak JWT_SECRET'); process.exit(1); }
 if (!ADMIN_PASSWORD) { console.error('❌ Brak ADMIN_PASSWORD'); process.exit(1); }
@@ -49,35 +69,29 @@ if (!fs.existsSync(dir)) fs.mkdirSync(dir);
 const plateDir = './uploads/plates';
 if (!fs.existsSync(plateDir)) fs.mkdirSync(plateDir, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-    cb(null, uniqueSuffix + '-' + safeName);
-  }
-});
 const pdfFileFilter = (req, file, cb) => {
   if (file.mimetype === 'application/pdf' && path.extname(file.originalname).toLowerCase() === '.pdf') cb(null, true);
   else cb(new Error('Tylko pliki PDF są dozwolone.'));
 };
-const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 }, fileFilter: pdfFileFilter });
 
-const plateStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/plates/'),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-    cb(null, uniqueSuffix + '-' + safeName);
-  }
-});
 const imageFileFilter = (req, file, cb) => {
   const allowedMimes = ['image/jpeg', 'image/png', 'image/jpg'];
   const allowedExts = ['.jpg', '.jpeg', '.png'];
   if (allowedMimes.includes(file.mimetype) && allowedExts.includes(path.extname(file.originalname).toLowerCase())) cb(null, true);
   else cb(new Error('Tylko pliki JPG/PNG są dozwolone.'));
 };
-const uploadPlateImage = multer({ storage: plateStorage, limits: { fileSize: 5 * 1024 * 1024 }, fileFilter: imageFileFilter });
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: pdfFileFilter
+});
+
+const uploadPlateImage = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: imageFileFilter
+});
 
 const requireAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -268,25 +282,36 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), async (req, r
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
   try {
+    const result = await uploadToCloudinary(file.buffer, 'vpkm/reports', 'raw');
+    const pdfUrl = result.secure_url;
     const id = Date.now();
     await pool.query(
       'INSERT INTO reports (id, driver_id, driver_name, line, date, pdf_url, original_name, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-      [id, req.body.driverId, req.body.driverName, req.body.line, new Date().toLocaleString('pl-PL'), `/api/files/${file.filename}`, file.originalname, 'pending']
+      [id, req.body.driverId, req.body.driverName, req.body.line,
+       new Date().toLocaleString('pl-PL'), pdfUrl, file.originalname, 'pending']
     );
-    await pool.query('UPDATE shifts SET status = $1 WHERE driver_id = $2 AND status = $3', ['completed', req.body.driverId, 'active']);
+    await pool.query('UPDATE shifts SET status = $1 WHERE driver_id = $2 AND status = $3',
+      ['completed', req.body.driverId, 'active']);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.get('/api/fleet', requireAuth, async (req, res) => {
+app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), async (req, res) => {
+  const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
+  const file = req.file;
+  const id = 'bus-' + Date.now();
   try {
-    const result = await pool.query('SELECT * FROM fleet ORDER BY bus_number');
-    res.json(result.rows.map(v => ({
-      id: v.id, busNumber: v.bus_number, brand: v.brand, model: v.model,
-      vehicleType: v.vehicle_type, status: v.status, yearManufactured: v.year_manufactured,
-      assignedDriverId: v.assigned_driver_id, assignedDriverName: v.assigned_driver_name,
-      notes: v.notes, plateImageUrl: v.plate_image_url
-    })));
+    let plateImageUrl = '';
+    if (file) {
+      const result = await uploadToCloudinary(file.buffer, 'vpkm/plates', 'image');
+      plateImageUrl = result.secure_url;
+    }
+    await pool.query(
+      'INSERT INTO fleet (id, bus_number, brand, model, vehicle_type, status, year_manufactured, assigned_driver_id, assigned_driver_name, notes, plate_image_url) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+      [id, busNumber || '', brand || '', model || '', vehicleType || '', status || 'eksploatowany',
+       yearManufactured || '', assignedDriverId || '', assignedDriverName || 'Brak', notes || '', plateImageUrl]
+    );
+    res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
@@ -359,13 +384,17 @@ app.put('/api/fleet/:id', requireAdmin, uploadPlateImage.single('plate_image'), 
   try {
     const existing = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
     if (existing.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono pojazdu' });
-    const plateImageUrl = file ? `/api/plate-images/${file.filename}` : existing.rows[0].plate_image_url;
+    let plateImageUrl = existing.rows[0].plate_image_url;
+    if (file) {
+      const result = await uploadToCloudinary(file.buffer, 'vpkm/plates', 'image');
+      plateImageUrl = result.secure_url;
+    }
     await pool.query(
       'UPDATE fleet SET bus_number=$1, brand=$2, model=$3, vehicle_type=$4, status=$5, year_manufactured=$6, assigned_driver_id=$7, assigned_driver_name=$8, notes=$9, plate_image_url=$10 WHERE id=$11',
       [busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId || '', assignedDriverName || 'Brak', notes, plateImageUrl, id]
     );
-    const result = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
-    const v = result.rows[0];
+    const result2 = await pool.query('SELECT * FROM fleet WHERE id = $1', [id]);
+    const v = result2.rows[0];
     res.json({ success: true, vehicle: {
       id: v.id, busNumber: v.bus_number, brand: v.brand, model: v.model,
       vehicleType: v.vehicle_type, status: v.status, yearManufactured: v.year_manufactured,
