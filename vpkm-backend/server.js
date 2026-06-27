@@ -11,6 +11,7 @@ const helmet = require('helmet');
 const { Pool } = require('pg');
 const cloudinary = require('cloudinary').v2;
 const { Readable } = require('stream');
+const validator = require('validator');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const SECRET = process.env.JWT_SECRET;
@@ -59,8 +60,20 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-const globalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 1000, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo zapytań.' } });
-const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' } });
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Za dużo zapytań. Spróbuj ponownie za chwilę.' }
+});
+
+const uploadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  message: { error: 'Za dużo uploadów. Poczekaj godzinę.' }
+});
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' } });
 
 app.use(globalLimiter);
 app.use(express.json({ limit: '1mb' }));
@@ -279,7 +292,7 @@ app.get('/api/shifts/history/:driverId', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/reports', requireAuth, upload.single('report_pdf'), async (req, res) => {
+app.post('/api/reports', requireAuth, uploadLimiter, upload.single('report_pdf'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
   try {
@@ -297,7 +310,7 @@ app.post('/api/reports', requireAuth, upload.single('report_pdf'), async (req, r
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-app.post('/api/fleet', requireAdmin, uploadPlateImage.single('plate_image'), async (req, res) => {
+app.post('/api/fleet', requireAdmin, uploadLimiter, uploadPlateImage.single('plate_image'), async (req, res) => {
   const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
   const file = req.file;
   const id = 'bus-' + Date.now();
@@ -414,6 +427,8 @@ app.delete('/api/fleet/:id', requireAdmin, async (req, res) => {
 
 app.post('/api/drivers', requireAdmin, async (req, res) => {
   const { login, password, displayName, employeeNumber, fullName, robloxNick, position, employmentStatus, additionalInfo, points, minuses } = req.body;
+
+  // Walidacja długości
   if (!login || login.length < 3 || login.length > 50) {
     return res.status(400).json({ error: 'Login musi mieć 3-50 znaków' });
   }
@@ -423,29 +438,55 @@ app.post('/api/drivers', requireAdmin, async (req, res) => {
   if (!displayName || displayName.length < 2 || displayName.length > 100) {
     return res.status(400).json({ error: 'Nazwa musi mieć 2-100 znaków' });
   }
+
+  // Sanityzacja — oczyszczenie danych z niebezpiecznych znaków
+  const safeLogin = validator.escape(login.trim());
+  const safeDisplayName = validator.escape(displayName.trim());
+  const safeFullName = fullName ? validator.escape(fullName.trim()) : '';
+  const safeRobloxNick = robloxNick ? validator.escape(robloxNick.trim()) : '';
+  const safePosition = position ? validator.escape(position.trim()) : '';
+  const safeAdditionalInfo = additionalInfo ? validator.escape(additionalInfo.trim()) : '';
+  const safeEmployeeNumber = employeeNumber ? validator.escape(employeeNumber.trim()) : '';
+
   try {
-    const existing = await pool.query('SELECT id FROM users WHERE login = $1', [login]);
+    const existing = await pool.query('SELECT id FROM users WHERE login = $1', [safeLogin]);
     if (existing.rows.length > 0) return res.status(400).json({ success: false, message: 'Ten login jest już zajęty!' });
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const id = 'driver-' + randomUUID();
+
     await pool.query(
       `INSERT INTO users (id, login, password, role, display_name, employee_number, full_name, roblox_nick, position, employment_status, additional_info, points, minuses)
        VALUES ($1,$2,$3,'driver',$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [id, login, hashedPassword, displayName, employeeNumber || '', fullName || '', robloxNick || '', position || '', employmentStatus || 'pracujacy', additionalInfo || '', points || 0, minuses || 0]
+      [id, safeLogin, hashedPassword, safeDisplayName, safeEmployeeNumber, safeFullName, safeRobloxNick, safePosition, employmentStatus || 'pracujacy', safeAdditionalInfo, points || 0, minuses || 0]
     );
-    res.json({ success: true, driver: { id, login, displayName, role: 'driver' } });
+
+    res.json({ success: true, driver: { id, login: safeLogin, displayName: safeDisplayName, role: 'driver' } });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
 app.put('/api/drivers/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { displayName, employeeNumber, fullName, robloxNick, position, employmentStatus, additionalInfo, points, minuses } = req.body;
+
+  if (!displayName || displayName.length < 2 || displayName.length > 100) {
+    return res.status(400).json({ error: 'Nazwa musi mieć 2-100 znaków' });
+  }
+
+  // Sanityzacja
+  const safeDisplayName = validator.escape(displayName.trim());
+  const safeFullName = fullName ? validator.escape(fullName.trim()) : '';
+  const safeRobloxNick = robloxNick ? validator.escape(robloxNick.trim()) : '';
+  const safePosition = position ? validator.escape(position.trim()) : '';
+  const safeAdditionalInfo = additionalInfo ? validator.escape(additionalInfo.trim()) : '';
+  const safeEmployeeNumber = employeeNumber ? validator.escape(employeeNumber.trim()) : '';
+
   try {
     const result = await pool.query(
       `UPDATE users SET display_name=$1, employee_number=$2, full_name=$3, roblox_nick=$4,
        position=$5, employment_status=$6, additional_info=$7, points=$8, minuses=$9
        WHERE id=$10 AND role='driver' RETURNING *`,
-      [displayName, employeeNumber || '', fullName || '', robloxNick || '', position || '', employmentStatus || 'pracujacy', additionalInfo || '', points || 0, minuses || 0, id]
+      [safeDisplayName, safeEmployeeNumber, safeFullName, safeRobloxNick, safePosition, employmentStatus || 'pracujacy', safeAdditionalInfo, points || 0, minuses || 0, id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
     res.json({ success: true });
@@ -576,17 +617,23 @@ app.post('/api/messages/read-all', requireAuth, async (req, res) => {
 
 app.post('/api/messages', requireAdmin, async (req, res) => {
   const { toId, toName, content, isGlobal } = req.body;
+
   if (!content || !content.trim()) {
     return res.status(400).json({ error: 'Treść komunikatu nie może być pusta' });
   }
   if (content.length > 1000) {
-    return res.status(400).json({ error: 'Treść komunikatu nie może przekraczać 1000 znaków' });
+    return res.status(400).json({ error: 'Treść nie może przekraczać 1000 znaków' });
   }
+
+  // Sanityzacja
+  const safeContent = validator.escape(content.trim());
+  const safeToName = toName ? validator.escape(toName.trim()) : '';
+
   try {
     const id = Date.now();
     await pool.query(
       'INSERT INTO messages (id, from_id, from_name, to_id, to_name, content, is_global) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-      [id, req.user.id, req.user.displayName, isGlobal ? null : toId, isGlobal ? null : toName, content.trim(), !!isGlobal]
+      [id, req.user.id, req.user.displayName, isGlobal ? null : toId, isGlobal ? null : safeToName, safeContent, !!isGlobal]
     );
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
@@ -636,6 +683,7 @@ app.get('/api/schedules', requireAuth, async (req, res) => {
 
 app.post('/api/schedules', requireAdmin, async (req, res) => {
   const { name, category, data } = req.body;
+
   if (!name || name.length < 2 || name.length > 100) {
     return res.status(400).json({ error: 'Nazwa rozkładu musi mieć 2-100 znaków' });
   }
@@ -645,20 +693,17 @@ app.post('/api/schedules', requireAdmin, async (req, res) => {
   if (!data) {
     return res.status(400).json({ error: 'Brak danych rozkładu' });
   }
+
+  // Sanityzacja nazwy
+  const safeName = validator.escape(name.trim());
+
   try {
     const id = Date.now();
     await pool.query(
       'INSERT INTO schedules (id, name, category, data) VALUES ($1,$2,$3,$4)',
-      [id, name, category, JSON.stringify(data)]
+      [id, safeName, category, JSON.stringify(data)]
     );
     res.json({ success: true, id });
-  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
-});
-
-app.delete('/api/schedules/:id', requireAdmin, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM schedules WHERE id = $1', [req.params.id]);
-    res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
