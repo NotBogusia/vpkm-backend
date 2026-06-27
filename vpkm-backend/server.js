@@ -357,7 +357,6 @@ app.get('/api/shifts/history/:driverId', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
-req.setTimeout(120000); // 2 minuty dla uploadów
 app.post('/api/reports', requireAuth, uploadLimiter, upload.single('report_pdf'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
