@@ -46,6 +46,11 @@ const pool = new Pool({
 });
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
+app.disable('x-powered-by');
+app.use((req, res, next) => {
+  res.removeHeader('Server');
+  next();
+});
 app.set('trust proxy', 1);
 
 const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:5173')
@@ -77,6 +82,27 @@ const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeade
 
 app.use(globalLimiter);
 app.use(express.json({ limit: '1mb' }));
+// ---------------------------------------------------------
+// ⏱️ TIMEOUT REQUESTÓW
+// ---------------------------------------------------------
+app.use((req, res, next) => {
+  req.setTimeout(30000, () => {
+    logSuspicious(req, 'Request timeout po 30 sekundach');
+    res.status(408).json({ error: 'Request timeout — zbyt długo trwa przetwarzanie' });
+  });
+  res.setTimeout(30000, () => {
+    logSuspicious(req, 'Response timeout po 30 sekundach');
+  });
+  next();
+});
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// ---------------------------------------------------------
+// 🔍 LOGGER PODEJRZANYCH AKTYWNOŚCI
+// ---------------------------------------------------------
+const logSuspicious = (req, reason) => {
+  console.warn(`⚠️ PODEJRZANA AKTYWNOŚĆ: ${reason} | IP: ${req.ip} | URL: ${req.originalUrl} | ${new Date().toISOString()}`);
+};
 
 const dir = './uploads';
 if (!fs.existsSync(dir)) fs.mkdirSync(dir);
@@ -109,16 +135,43 @@ const uploadPlateImage = multer({
 
 const requireAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Brak tokenu autoryzacji' });
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    logSuspicious(req, 'Request bez tokenu autoryzacji');
+    return res.status(401).json({ error: 'Brak tokenu autoryzacji' });
+  }
   const token = authHeader.split(' ')[1];
-  try { req.user = jwt.verify(token, SECRET); next(); }
-  catch { return res.status(401).json({ error: 'Token nieprawidłowy lub wygasł' }); }
+  try {
+    req.user = jwt.verify(token, SECRET);
+    next();
+  } catch {
+    logSuspicious(req, 'Próba użycia nieprawidłowego lub wygasłego tokenu');
+    return res.status(401).json({ error: 'Token nieprawidłowy lub wygasł' });
+  }
 };
 
+// ---------------------------------------------------------
+// 🔐 MIDDLEWARE AUTORYZACJI ADMIN Z WERYFIKACJĄ W BAZIE
+// ---------------------------------------------------------
 const requireAdmin = (req, res, next) => {
-  requireAuth(req, res, () => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Brak uprawnień administratora' });
-    next();
+  requireAuth(req, res, async () => {
+    if (req.user.role !== 'admin') {
+      logSuspicious(req, `Próba dostępu do panelu admina przez użytkownika: ${req.user.id} (rola: ${req.user.role})`);
+      return res.status(403).json({ error: 'Brak uprawnień administratora' });
+    }
+    try {
+      const result = await pool.query(
+        'SELECT id FROM users WHERE id = $1 AND role = $2',
+        [req.user.id, 'admin']
+      );
+      if (result.rows.length === 0) {
+        logSuspicious(req, `Próba użycia tokenu admina dla usuniętego konta: ${req.user.id}`);
+        return res.status(403).json({ error: 'Konto administratora nie istnieje lub zostało usunięte' });
+      }
+      next();
+    } catch (err) {
+      console.error('Błąd weryfikacji admina:', err);
+      return res.status(500).json({ error: 'Błąd serwera podczas weryfikacji uprawnień' });
+    }
   });
 };
 
@@ -218,12 +271,24 @@ app.get('/', (req, res) => res.send('Serwer vPKM działa poprawnie!'));
 
 app.post('/api/login', loginLimiter, async (req, res) => {
   const { login, password } = req.body;
+
+  if (!login || !password) {
+    logSuspicious(req, 'Próba logowania bez loginu lub hasła');
+    return res.status(400).json({ success: false, message: 'Podaj login i hasło' });
+  }
+
   try {
     const result = await pool.query('SELECT * FROM users WHERE login = $1', [login]);
     const user = result.rows[0];
-    if (!user) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    if (!user) {
+      logSuspicious(req, `Próba logowania na nieistniejące konto: ${login}`);
+      return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    }
     const passwordMatch = await bcrypt.compare(password, user.password);
-    if (!passwordMatch) return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    if (!passwordMatch) {
+      logSuspicious(req, `Błędne hasło dla konta: ${login}`);
+      return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
+    }
     const token = jwt.sign({ id: user.id, role: user.role, displayName: user.display_name }, SECRET, { expiresIn: '8h' });
     res.json({
       success: true,
@@ -292,6 +357,7 @@ app.get('/api/shifts/history/:driverId', requireAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
+req.setTimeout(120000); // 2 minuty dla uploadów
 app.post('/api/reports', requireAuth, uploadLimiter, upload.single('report_pdf'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).json({ error: 'Brak pliku PDF!' });
@@ -346,15 +412,21 @@ app.post('/api/change-password', requireAuth, async (req, res) => {
 
 app.get('/api/files/:filename', requireAuth, async (req, res) => {
   const filename = req.params.filename;
-  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
-  const filePath = path.join(__dirname, 'uploads', filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Plik nie istnieje' });
+  // Tylko litery, cyfry, myślniki, podkreślenia i kropki
+  if (!/^[a-zA-Z0-9\-_.]+$/.test(filename)) {
+    return res.status(400).json({ error: 'Nieprawidłowa nazwa pliku' });
+  }
+  // Maksymalna długość nazwy pliku
+  if (filename.length > 200) {
+    return res.status(400).json({ error: 'Nazwa pliku jest za długa' });
+  }
   if (req.user.role === 'admin') return res.sendFile(filePath);
   const relativeUrl = `/api/files/${filename}`;
   try {
     const shiftResult = await pool.query('SELECT id FROM shifts WHERE pdf_url = $1 AND driver_id = $2', [relativeUrl, req.user.id]);
     const reportResult = await pool.query('SELECT id FROM reports WHERE pdf_url = $1 AND driver_id = $2', [relativeUrl, req.user.id]);
     if (shiftResult.rows.length > 0 || reportResult.rows.length > 0) return res.sendFile(filePath);
+    logSuspicious(req, `Próba dostępu do cudzego pliku: ${filename} przez użytkownika: ${req.user.id}`);
     return res.status(403).json({ error: 'Brak dostępu do tego pliku' });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
@@ -499,6 +571,7 @@ app.delete('/api/drivers/:id', requireAdmin, async (req, res) => {
     const result = await pool.query('SELECT id FROM users WHERE id = $1 AND role = $2', [id, 'driver']);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Nie znaleziono kierowcy' });
     await pool.query('DELETE FROM users WHERE id = $1', [id]);
+    console.log(`🗑️ Admin ${req.user.id} usunął kierowcę ${id} | ${new Date().toISOString()}`);
     await pool.query('UPDATE fleet SET assigned_driver_id = $1, assigned_driver_name = $2 WHERE assigned_driver_id = $3', ['', 'Brak', id]);
     res.json({ success: true });
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
