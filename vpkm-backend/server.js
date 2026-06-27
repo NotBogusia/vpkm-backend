@@ -289,7 +289,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
       logSuspicious(req, `Błędne hasło dla konta: ${login}`);
       return res.status(401).json({ success: false, message: 'Błędny login lub hasło!' });
     }
-    const token = jwt.sign({ id: user.id, role: user.role, displayName: user.display_name }, SECRET, { expiresIn: '8h' });
+    const token = jwt.sign({ id: user.id, role: user.role, displayName: user.display_name }, SECRET, { expiresIn: '2h' });
     res.json({
       success: true,
       user: { id: user.id, login: user.login, role: user.role, displayName: user.display_name },
