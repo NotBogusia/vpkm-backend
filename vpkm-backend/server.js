@@ -628,6 +628,52 @@ app.get('/api/reports/pending', requireAdmin, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
+// Historia raportów kierowcy
+app.get('/api/reports/my', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM reports WHERE driver_id = $1 ORDER BY id DESC LIMIT 50',
+      [req.user.id]
+    );
+    res.json({
+      reports: result.rows.map(r => ({
+        id: r.id, driverId: r.driver_id, driverName: r.driver_name,
+        line: r.line, date: r.date, pdfUrl: r.pdf_url,
+        originalName: r.original_name, status: r.status
+      }))
+    });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
+// Wszystkie raporty dla admina z filtrowaniem
+app.get('/api/reports/all', requireAdmin, async (req, res) => {
+  const { status, driverId } = req.query;
+  try {
+    let query = 'SELECT * FROM reports WHERE 1=1';
+    const params = [];
+
+    if (status && status !== 'all') {
+      params.push(status);
+      query += ` AND status = $${params.length}`;
+    }
+    if (driverId && driverId !== 'all') {
+      params.push(driverId);
+      query += ` AND driver_id = $${params.length}`;
+    }
+
+    query += ' ORDER BY id DESC LIMIT 100';
+
+    const result = await pool.query(query, params);
+    res.json({
+      reports: result.rows.map(r => ({
+        id: r.id, driverId: r.driver_id, driverName: r.driver_name,
+        line: r.line, date: r.date, pdfUrl: r.pdf_url,
+        originalName: r.original_name, status: r.status
+      }))
+    });
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
 app.post('/api/reports/:id/status', requireAdmin, async (req, res) => {
   const reportId = parseInt(req.params.id);
   const action = req.body.action;
