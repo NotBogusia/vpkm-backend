@@ -67,7 +67,7 @@ app.use(cors({
 
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Za dużo zapytań. Spróbuj ponownie za chwilę.' }
@@ -78,7 +78,7 @@ const uploadLimiter = rateLimit({
   max: 20,
   message: { error: 'Za dużo uploadów. Poczekaj godzinę.' }
 });
-const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' } });
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, standardHeaders: true, legacyHeaders: false, message: { error: 'Za dużo prób logowania. Poczekaj 15 minut.' } });
 
 app.use(globalLimiter);
 app.use(express.json({ limit: '1mb' }));
