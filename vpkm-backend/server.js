@@ -375,6 +375,25 @@ app.post('/api/reports', requireAuth, uploadLimiter, upload.single('report_pdf')
   } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
 });
 
+app.get('/api/fleet', requireAuth, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM fleet ORDER BY bus_number');
+    res.json(result.rows.map(v => ({
+      id: v.id,
+      busNumber: v.bus_number,
+      brand: v.brand,
+      model: v.model,
+      vehicleType: v.vehicle_type,
+      status: v.status,
+      yearManufactured: v.year_manufactured,
+      assignedDriverId: v.assigned_driver_id,
+      assignedDriverName: v.assigned_driver_name,
+      notes: v.notes,
+      plateImageUrl: v.plate_image_url
+    })));
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Błąd serwera' }); }
+});
+
 app.post('/api/fleet', requireAdmin, uploadLimiter, uploadPlateImage.single('plate_image'), async (req, res) => {
   const { busNumber, brand, model, vehicleType, status, yearManufactured, assignedDriverId, assignedDriverName, notes } = req.body;
   const file = req.file;
